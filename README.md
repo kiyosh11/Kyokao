@@ -443,3 +443,12 @@ Kyokao currently has no MCP integration, plugin system, context compression, tok
 ## Contributing and license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the required local checks. Kyokao is licensed under the [ISC License](LICENSE).
+
+## Launchline demo
+
+The repository also includes the Launchline B2B release-intelligence demo:
+
+```sh
+pnpm install
+pnpm --filter launchline dev
+```
