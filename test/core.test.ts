@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, redact } from '@kyokao/config';
@@ -57,6 +57,18 @@ describe('sandbox and tools', () => {
         })
       ).content,
     ).toContain('exit code');
+  });
+  it.skipIf(process.platform === 'win32')('canonicalizes a symlinked workspace root', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const workspace = join(dir, 'workspace');
+    const alias = join(dir, 'workspace-link');
+    await mkdir(workspace);
+    await symlink(workspace, alias);
+    const tools = new CoreTools(new WorkspaceSandbox(alias), 'full-auto');
+    expect((await tools.execute('write_file', { path: 'answer.txt', content: 'ok' })).isError).toBe(
+      undefined,
+    );
+    expect(await readFile(join(workspace, 'answer.txt'), 'utf8')).toBe('ok');
   });
 });
 describe('OpenAI SDK streaming transcript', () => {

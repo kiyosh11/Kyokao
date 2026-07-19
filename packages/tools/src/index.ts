@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve, sep } from 'node:path';
@@ -32,7 +33,7 @@ const spec = (
 export class WorkspaceSandbox {
   readonly root: string;
   constructor(root: string) {
-    this.root = resolve(root);
+    this.root = realpathSync(resolve(root));
   }
   async path(input: unknown): Promise<string> {
     if (typeof input !== 'string' || !input || input.includes('\0'))
