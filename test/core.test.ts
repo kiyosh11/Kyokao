@@ -4,10 +4,16 @@ import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, redact } from '@kyokao/config';
-import { WorkspaceSandbox, CoreTools } from '@kyokao/tools';
+import {
+  WorkspaceSandbox,
+  CoreTools,
+  CompositeTools,
+  loadPlugins,
+  connectMcp,
+} from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
-import { OpenAICompatibleProvider, toOpenAIMessage } from '@kyokao/providers';
-import { Agent } from '@kyokao/agent';
+import { OpenAICompatibleProvider, modelCatalog, toOpenAIMessage } from '@kyokao/providers';
+import { Agent, compressMessages, estimateTokens } from '@kyokao/agent';
 const servers: Server[] = [];
 afterEach(() => servers.splice(0).forEach((server) => server.close()));
 const event = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
@@ -39,6 +45,22 @@ describe('configuration', () => {
     expect(config.model).toBe('environment');
     expect(config.maxIterations).toBe(3);
     expect(redact({ nested: { apiKey: 'x' } })).toEqual({ nested: { apiKey: '***REDACTED***' } });
+  });
+  it('accepts MCP, plugin, and context settings', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    await writeFile(
+      join(dir, '.kyokao.json'),
+      JSON.stringify({
+        contextWindow: 4000,
+        compressionThreshold: 0.7,
+        plugins: ['./plugin.mjs'],
+        mcp: { demo: { command: 'demo-server', args: ['--stdio'] } },
+      }),
+    );
+    const config = await loadConfig({ cwd: dir });
+    expect(config.contextWindow).toBe(4000);
+    expect(config.mcp.demo.command).toBe('demo-server');
+    expect(config.plugins).toEqual(['./plugin.mjs']);
   });
 });
 describe('sandbox and tools', () => {
@@ -138,6 +160,7 @@ describe('OpenAI SDK streaming transcript', () => {
       'Wrote answer.txt',
     );
     expect(await readFile(join(dir, 'answer.txt'), 'utf8')).toBe('ok');
+    expect(session.usage?.totalTokens).toBeGreaterThan(0);
     expect(
       requests[1].messages.find((message: any) => message.role === 'assistant').tool_calls[0],
     ).toMatchObject({ id: 'call_1', type: 'function', function: { name: 'write_file' } });
@@ -162,4 +185,102 @@ describe('OpenAI SDK streaming transcript', () => {
     ).toMatchObject({
       tool_calls: [{ type: 'function', function: { name: 'f', arguments: '{}' } }],
     }));
+});
+describe('platform extensions', () => {
+  it('compresses old context while preserving the system prompt and recent turn', () => {
+    const messages = [
+      { role: 'system' as const, content: 'system' },
+      ...Array.from({ length: 20 }, (_, i) => ({
+        role: 'user' as const,
+        content: `old ${i} `.repeat(40),
+      })),
+      { role: 'user' as const, content: 'latest' },
+    ];
+    const result = compressMessages(messages, 200);
+    expect(result.removed).toBeGreaterThan(0);
+    expect(result.messages[0]).toMatchObject({ role: 'system' });
+    expect(result.messages.at(-1)).toMatchObject({ content: 'latest' });
+    expect(estimateTokens(result.messages)).toBeLessThan(500);
+  });
+  it('composes core and plugin tools', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const pluginPath = join(dir, 'plugin.mjs');
+    await writeFile(
+      pluginPath,
+      `export default {
+        name: 'demo',
+        tools: [{ type: 'function', function: { name: 'demo_echo', description: 'echo', parameters: { type: 'object', properties: {} } } }],
+        async execute(name, args) { return { content: name + ':' + JSON.stringify(args) }; }
+      }`,
+    );
+    const [plugin] = await loadPlugins([pluginPath], dir);
+    const tools = new CompositeTools([
+      new CoreTools(new WorkspaceSandbox(dir), 'full-auto'),
+      plugin,
+    ]);
+    expect(tools.definitions().some((definition) => definition.function.name === 'demo_echo')).toBe(
+      true,
+    );
+    expect((await tools.execute('demo_echo', { ok: true })).content).toContain('"ok":true');
+  });
+  it('ships a model catalog with tool capability metadata', () => {
+    expect(modelCatalog.find((model) => model.id === 'gpt-4o-mini')).toMatchObject({
+      supportsTools: true,
+      contextWindow: 128000,
+    });
+  });
+  it('validates live model availability before a request', async () => {
+    const server = createServer((request, response) => {
+      if (request.url === '/v1/models') {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ data: [{ id: 'available' }] }));
+      } else response.end(JSON.stringify({ choices: [] }));
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
+    const provider = new OpenAICompatibleProvider({ baseURL, model: 'available' });
+    await expect(provider.validateModel()).resolves.toMatchObject({ id: 'available' });
+    await expect(
+      new OpenAICompatibleProvider({ baseURL, model: 'missing' }).validateModel(),
+    ).rejects.toThrow('not available');
+  });
+  it('discovers and executes MCP stdio tools', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const serverPath = join(dir, 'mcp-server.mjs');
+    await writeFile(
+      serverPath,
+      `let buffer = Buffer.alloc(0);
+       process.stdin.on('data', chunk => {
+         buffer = Buffer.concat([buffer, chunk]);
+         while (true) {
+           const end = buffer.indexOf('\\r\\n\\r\\n');
+           if (end < 0) break;
+           const length = Number(buffer.subarray(0, end).toString().match(/\\d+/)[0]);
+           if (buffer.length < end + 4 + length) break;
+           const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length));
+           buffer = buffer.subarray(end + 4 + length);
+           if (!message.id) continue;
+           const result = message.method === 'tools/list'
+             ? { tools: [{ name: 'echo', description: 'echo text', inputSchema: { type: 'object', properties: {} } }] }
+             : message.method === 'tools/call'
+               ? { content: [{ type: 'text', text: 'mcp ok' }] }
+               : { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'test', version: '1' } };
+           const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+           process.stdout.write('Content-Length: ' + body.length + '\\r\\n\\r\\n');
+           process.stdout.write(body);
+         }
+       });`,
+    );
+    const tools = await connectMcp(
+      { demo: { command: process.execPath, args: [serverPath] } },
+      dir,
+    );
+    expect(tools?.definitions().map((definition) => definition.function.name)).toEqual([
+      'mcp_demo_echo',
+    ]);
+    expect((await tools!.execute('mcp_demo_echo', {})).content).toBe('mcp ok');
+    await tools?.close?.();
+  });
 });

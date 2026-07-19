@@ -2,6 +2,12 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ChatMessage } from '@kyokao/providers';
+import type { TokenUsage } from '@kyokao/providers';
+export interface SessionUsage extends TokenUsage {
+  requests: number;
+  estimatedCostUsd: number;
+  compressedMessages: number;
+}
 export interface Session {
   id: string;
   createdAt: string;
@@ -9,6 +15,8 @@ export interface Session {
   messages: ChatMessage[];
   task?: string;
   checkpoint?: string;
+  usage?: SessionUsage;
+  contextSummary?: string;
 }
 async function atomicWrite(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

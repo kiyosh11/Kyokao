@@ -2,6 +2,12 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto';
+export interface McpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
 export interface ProviderConfig {
   apiKey?: string;
   baseURL?: string;
@@ -15,6 +21,10 @@ export interface KyokaoConfig {
   profiles: Record<string, Partial<KyokaoConfig>>;
   providers: Record<string, ProviderConfig>;
   aliases: Record<string, string>;
+  mcp: Record<string, McpServerConfig>;
+  plugins: string[];
+  contextWindow: number;
+  compressionThreshold: number;
 }
 export const defaults: KyokaoConfig = {
   provider: 'openai',
@@ -24,6 +34,10 @@ export const defaults: KyokaoConfig = {
   profiles: {},
   providers: {},
   aliases: {},
+  mcp: {},
+  plugins: [],
+  contextWindow: 16_000,
+  compressionThreshold: 0.8,
 };
 export const providerPresets: Record<string, { baseURL: string; env: string }> = {
   openai: { baseURL: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY' },
@@ -68,6 +82,51 @@ function validateConfig(value: unknown): asserts value is Partial<KyokaoConfig> 
     if (!c[section] || typeof c[section] !== 'object' || Array.isArray(c[section]))
       throw new Error(`${section} must be an object`);
   }
+  if ('mcp' in c) {
+    if (!c.mcp || typeof c.mcp !== 'object' || Array.isArray(c.mcp))
+      throw new Error('mcp must be an object');
+    for (const [name, server] of Object.entries(c.mcp as Record<string, unknown>)) {
+      if (!server || typeof server !== 'object' || Array.isArray(server))
+        throw new Error(`mcp server ${name} must be an object`);
+      const value = server as Record<string, unknown>;
+      if (typeof value.command !== 'string' || !value.command)
+        throw new Error(`mcp server ${name}.command must be a string`);
+      if (
+        'args' in value &&
+        (!Array.isArray(value.args) || !value.args.every((arg) => typeof arg === 'string'))
+      )
+        throw new Error(`mcp server ${name}.args must be an array of strings`);
+      if (
+        'env' in value &&
+        (!value.env ||
+          typeof value.env !== 'object' ||
+          Array.isArray(value.env) ||
+          !Object.values(value.env as object).every((env) => typeof env === 'string'))
+      )
+        throw new Error(`mcp server ${name}.env must be an object of strings`);
+      if ('cwd' in value && typeof value.cwd !== 'string')
+        throw new Error(`mcp server ${name}.cwd must be a string`);
+    }
+  }
+  if ('plugins' in c) {
+    if (!Array.isArray(c.plugins) || !c.plugins.every((plugin) => typeof plugin === 'string'))
+      throw new Error('plugins must be an array of strings');
+  }
+  for (const key of ['contextWindow', 'compressionThreshold']) {
+    if (!(key in c)) continue;
+    if (typeof c[key] !== 'number' || !Number.isFinite(c[key] as number))
+      throw new Error(`${key} must be a number`);
+  }
+  if (
+    'contextWindow' in c &&
+    (!Number.isInteger(c.contextWindow) || (c.contextWindow as number) < 1000)
+  )
+    throw new Error('contextWindow must be an integer of at least 1000');
+  if (
+    'compressionThreshold' in c &&
+    ((c.compressionThreshold as number) <= 0 || (c.compressionThreshold as number) > 1)
+  )
+    throw new Error('compressionThreshold must be greater than 0 and at most 1');
   for (const [name, provider] of Object.entries((c.providers ?? {}) as Record<string, unknown>)) {
     if (!provider || typeof provider !== 'object' || Array.isArray(provider))
       throw new Error(`provider ${name} must be an object`);
@@ -84,6 +143,8 @@ function validateConfig(value: unknown): asserts value is Partial<KyokaoConfig> 
         profiles: {},
         providers: (profile as any)?.providers ?? {},
         aliases: (profile as any)?.aliases ?? {},
+        mcp: (profile as any)?.mcp ?? {},
+        plugins: (profile as any)?.plugins ?? [],
       });
     } catch (e: any) {
       throw new Error(`profile ${name}: ${e.message}`);
@@ -142,6 +203,10 @@ export async function loadConfig(
     result.maxIterations > 100
   )
     throw new Error('maxIterations must be 1–100');
+  if (result.contextWindow < 1000 || !Number.isInteger(result.contextWindow))
+    throw new Error('contextWindow must be an integer of at least 1000');
+  if (result.compressionThreshold <= 0 || result.compressionThreshold > 1)
+    throw new Error('compressionThreshold must be greater than 0 and at most 1');
   return result as KyokaoConfig;
 }
 export function resolveProvider(

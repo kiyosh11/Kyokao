@@ -12,7 +12,60 @@ export type ChatMessage =
 export interface ChatResponse {
   message: Extract<ChatMessage, { role: 'assistant' }>;
   finishReason?: string;
+  usage?: TokenUsage;
 }
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+export interface ModelInfo {
+  id: string;
+  provider?: string;
+  contextWindow?: number;
+  inputCostPerMillion?: number;
+  outputCostPerMillion?: number;
+  supportsTools?: boolean;
+}
+export const modelCatalog: ModelInfo[] = [
+  {
+    id: 'gpt-4o-mini',
+    provider: 'openai',
+    contextWindow: 128000,
+    inputCostPerMillion: 0.15,
+    outputCostPerMillion: 0.6,
+    supportsTools: true,
+  },
+  {
+    id: 'gpt-4o',
+    provider: 'openai',
+    contextWindow: 128000,
+    inputCostPerMillion: 2.5,
+    outputCostPerMillion: 10,
+    supportsTools: true,
+  },
+  {
+    id: 'gpt-4.1-mini',
+    provider: 'openai',
+    contextWindow: 1047576,
+    inputCostPerMillion: 0.4,
+    outputCostPerMillion: 1.6,
+    supportsTools: true,
+  },
+  {
+    id: 'claude-3-5-sonnet',
+    contextWindow: 200000,
+    inputCostPerMillion: 3,
+    outputCostPerMillion: 15,
+    supportsTools: true,
+  },
+  {
+    id: 'llama-3.3-70b-versatile',
+    provider: 'groq',
+    contextWindow: 131072,
+    supportsTools: true,
+  },
+];
 export interface StreamEvents {
   onText?: (delta: string) => void;
   onToolCall?: (call: ToolCall) => void;
@@ -67,6 +120,27 @@ export class OpenAICompatibleProvider {
       ) ?? []
     );
   }
+  async modelCatalog(): Promise<ModelInfo[]> {
+    const ids = await this.models();
+    return ids.map((id) => ({
+      id,
+      ...modelCatalog.find((item) => item.id === id),
+      provider: this.options.baseURL,
+    }));
+  }
+  async validateModel(): Promise<ModelInfo> {
+    const models = await this.models();
+    const match = models.find((id) => id === this.options.model);
+    if (!match)
+      throw new Error(
+        `Model "${this.options.model}" is not available at ${this.options.baseURL}. Run "kyokao models" to see available IDs.`,
+      );
+    return {
+      id: match,
+      ...modelCatalog.find((item) => item.id === match),
+      provider: this.options.baseURL,
+    };
+  }
   async chat(
     messages: ChatMessage[],
     tools: unknown[],
@@ -94,13 +168,21 @@ export class OpenAICompatibleProvider {
         })) as OpenAI.Chat.ChatCompletion,
       );
     const stream = await this.client!.chat.completions.create(
-      { ...request, stream: true },
+      { ...request, stream: true, stream_options: { include_usage: true } },
       { signal },
     );
     let content = '';
     let finishReason: string | undefined;
+    let usage: TokenUsage | undefined;
     const calls = new Map<number, ToolCall>();
     for await (const chunk of stream) {
+      const chunkUsage = (chunk as unknown as { usage?: OpenAI.CompletionUsage }).usage;
+      if (chunkUsage)
+        usage = {
+          promptTokens: chunkUsage.prompt_tokens,
+          completionTokens: chunkUsage.completion_tokens,
+          totalTokens: chunkUsage.total_tokens,
+        };
       const choice = chunk.choices[0];
       if (!choice) continue;
       finishReason = choice.finish_reason ?? finishReason;
@@ -130,6 +212,7 @@ export class OpenAICompatibleProvider {
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       },
       finishReason,
+      usage,
     };
   }
   private fromCompletion(response: OpenAI.Chat.ChatCompletion): ChatResponse {
@@ -147,6 +230,13 @@ export class OpenAICompatibleProvider {
         })),
       },
       finishReason: choice.finish_reason,
+      usage: response.usage
+        ? {
+            promptTokens: response.usage.prompt_tokens,
+            completionTokens: response.usage.completion_tokens,
+            totalTokens: response.usage.total_tokens,
+          }
+        : undefined,
     };
   }
   private async fetchChat(
@@ -178,6 +268,7 @@ export class OpenAICompatibleProvider {
         };
         finish_reason?: string;
       }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     };
     const choice = body.choices?.[0];
     if (!choice) throw new Error('Provider returned no choices');
@@ -192,6 +283,13 @@ export class OpenAICompatibleProvider {
         })),
       },
       finishReason: choice.finish_reason,
+      usage: body.usage
+        ? {
+            promptTokens: body.usage.prompt_tokens ?? 0,
+            completionTokens: body.usage.completion_tokens ?? 0,
+            totalTokens: body.usage.total_tokens ?? 0,
+          }
+        : undefined,
     };
   }
   private headers(): Record<string, string> {
