@@ -17,8 +17,20 @@ export interface ToolDefinition {
   function: { name: string; description: string; parameters: object };
 }
 const clipped = (s: string) => (s.length > MAX ? `${s.slice(0, MAX)}\n…truncated…` : s);
+const comparablePath = (path: string) => {
+  const withoutDevicePrefix =
+    process.platform === 'win32'
+      ? path.startsWith('\\\\?\\UNC\\')
+        ? `\\\\${path.slice(8)}`
+        : path.startsWith('\\\\?\\')
+          ? path.slice(4)
+          : path
+      : path;
+  const normalized = resolve(withoutDevicePrefix);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+};
 const isWithin = (root: string, candidate: string) => {
-  const path = relative(root, candidate);
+  const path = relative(comparablePath(root), comparablePath(candidate));
   return path === '' || (path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path));
 };
 const spec = (
