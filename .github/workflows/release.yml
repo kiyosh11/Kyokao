@@ -1,0 +1,109 @@
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: node20-linux-x64
+          - runner: macos-15-intel
+            target: node20-macos-x64
+          - runner: macos-15
+            target: node20-macos-arm64
+          - runner: windows-latest
+            target: node20-win-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate release tag
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}" || {
+            echo "Tag ${GITHUB_REF_NAME} does not match CLI version v${VERSION}" >&2
+            exit 1
+          }
+      - run: pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build
+      - name: Build standalone binary
+        id: binary
+        uses: yao-pkg/pkg-action@v1
+        with:
+          config: packages/cli/package.json
+          entry: packages/cli/dist/kyokao.cjs
+          targets: ${{ matrix.target }}
+          compress: zip
+          checksum: none
+          filename: kyokao-{version}-{os}-{arch}
+          windows-product-name: Kyokao
+          windows-file-description: Kyokao local-first coding agent
+      - name: Smoke test binary
+        shell: bash
+        env:
+          BINARIES: ${{ steps.binary.outputs.binaries }}
+        run: |
+          node - <<'NODE'
+          const { spawnSync } = require('node:child_process');
+          const [binary] = JSON.parse(process.env.BINARIES);
+          const result = spawnSync(binary, ['--version'], { stdio: 'inherit' });
+          process.exit(result.status ?? 1);
+          NODE
+      - name: Collect release asset
+        shell: bash
+        env:
+          ARTIFACTS: ${{ steps.binary.outputs.artifacts }}
+        run: |
+          node - <<'NODE'
+          const { copyFileSync, mkdirSync } = require('node:fs');
+          const { basename, join } = require('node:path');
+          mkdirSync('release-assets', { recursive: true });
+          for (const artifact of JSON.parse(process.env.ARTIFACTS)) {
+            copyFileSync(artifact, join('release-assets', basename(artifact)));
+          }
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kyokao-${{ matrix.target }}
+          path: release-assets/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kyokao-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum *.zip > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Kyokao ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.zip
+            release-assets/SHA256SUMS.txt

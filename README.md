@@ -373,6 +373,17 @@ pnpm build
 
 CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 
+### Publish standalone CLI binaries
+
+Push a tag matching the CLI package version to build a GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
+
 ### Verify a release tarball without changing global npm state
 
 ```bash
