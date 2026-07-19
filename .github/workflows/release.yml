@@ -85,7 +85,7 @@ jobs:
             archive="${GITHUB_WORKSPACE}/release-assets/kyokao-${VERSION#v}-${target}.zip"
             (cd "${directory}" && zip -q "${archive}" ./*)
           done
-          sha256sum release-assets/*.zip > release-assets/SHA256SUMS.txt
+          (cd release-assets && sha256sum *.zip > SHA256SUMS.txt)
       - name: Verify release assets
         working-directory: release-assets
         run: sha256sum --check SHA256SUMS.txt
