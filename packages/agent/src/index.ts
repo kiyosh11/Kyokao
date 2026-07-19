@@ -7,6 +7,8 @@ import {
 } from '@kyokao/providers';
 import type { ToolExecutor } from '@kyokao/tools';
 import type { LocalStore, Session } from '@kyokao/memory';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export interface AgentOptions {
   provider: OpenAICompatibleProvider;
@@ -17,12 +19,42 @@ export interface AgentOptions {
   contextWindow?: number;
   compressionThreshold?: number;
   modelInfo?: ModelInfo;
+  instructions?: string;
+  maxToolCalls?: number;
+  maxCostUsd?: number;
+  maxOutputChars?: number;
   onEvent?: (kind: 'text' | 'tool' | 'assistant' | 'usage', text: string) => void;
   signal?: AbortSignal;
 }
 
-export const systemPrompt = (workspace: string) =>
-  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely.`;
+export const systemPrompt = (workspace: string, instructions = '') =>
+  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely.${instructions ? `\n\nRepository instructions:\n${instructions}` : ''}`;
+
+export async function loadInstructionFiles(workspace: string): Promise<string> {
+  const names = ['SOUL.md', 'soul.md', 'CLAUDE.md', 'claude.md', 'AGENTS.md', 'KYOKAO.md'];
+  const loaded: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const path = join(workspace, name);
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    try {
+      const content = await readFile(path, 'utf8');
+      if (content.trim()) {
+        loaded.push(`### ${name}\n${content.slice(0, 20_000)}`);
+        seen.add(key);
+      }
+    } catch {}
+  }
+  try {
+    for (const entry of await readdir(join(workspace, '.kyokao'))) {
+      if (!/^(instructions|soul)\.md$/i.test(entry)) continue;
+      const content = await readFile(join(workspace, '.kyokao', entry), 'utf8');
+      if (content.trim()) loaded.push(`### .kyokao/${entry}\n${content.slice(0, 20_000)}`);
+    }
+  } catch {}
+  return loaded.join('\n\n').slice(0, 60_000);
+}
 
 export function estimateTokens(messages: ChatMessage[]): number {
   return Math.ceil(
@@ -87,15 +119,24 @@ export class Agent {
   async run(prompt: string, session?: Session): Promise<Session> {
     const s = session ?? (await this.options.store.create(prompt));
     const fullMessages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(this.options.workspace) },
+      { role: 'system', content: systemPrompt(this.options.workspace, this.options.instructions) },
       ...s.messages,
       { role: 'user', content: prompt },
     ];
     s.messages.push({ role: 'user', content: prompt });
     const maxContext = this.options.contextWindow ?? 16_000;
     const threshold = Math.floor(maxContext * (this.options.compressionThreshold ?? 0.8));
+    let toolCalls = 0;
     for (let i = 0; i < this.options.maxIterations; i++) {
       this.options.signal?.throwIfAborted();
+      if (
+        this.options.maxCostUsd &&
+        this.options.maxCostUsd > 0 &&
+        (s.usage?.estimatedCostUsd ?? 0) >= this.options.maxCostUsd
+      )
+        throw new Error(
+          `Safety limit reached: estimated cost exceeded $${this.options.maxCostUsd}`,
+        );
       const compacted = compressMessages(fullMessages, threshold);
       if (compacted.summary) {
         s.contextSummary = compacted.summary;
@@ -165,6 +206,11 @@ export class Agent {
         return s;
       }
       for (const call of m.tool_calls) {
+        toolCalls += 1;
+        if (toolCalls > (this.options.maxToolCalls ?? 100))
+          throw new Error(
+            `Safety limit reached: maximum tool calls (${this.options.maxToolCalls ?? 100})`,
+          );
         let args: Record<string, unknown>;
         try {
           args = JSON.parse(call.arguments);
@@ -172,11 +218,15 @@ export class Agent {
           args = {};
         }
         const result = await this.options.tools.execute(call.name, args);
+        const content =
+          result.content.length > (this.options.maxOutputChars ?? 30_000)
+            ? `${result.content.slice(0, this.options.maxOutputChars ?? 30_000)}\n…truncated…`
+            : result.content;
         const toolMessage: ChatMessage = {
           role: 'tool',
           tool_call_id: call.id,
           name: call.name,
-          content: result.content,
+          content,
         };
         fullMessages.push(toolMessage);
         s.messages.push(toolMessage);

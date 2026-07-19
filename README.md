@@ -27,6 +27,7 @@ It is an early, command-line-oriented implementation—not a hosted service or a
 - One-shot prompts, piped prompts, and a simple persistent interactive `chat` loop.
 - Full-screen `tui` mode with syntax-highlighted Markdown code blocks.
 - Permission modes for file mutations and shell commands.
+- Configurable editor launching, repository instruction files, model sampling/fallback controls, and enforceable per-run safety budgets.
 - Workspace-scoped file, search, shell, read-only Git, and HTTP GET tools.
 - MCP stdio servers and JavaScript ESM plugins can add tools to the same permissioned loop.
 - Local JSON sessions that can be listed and resumed, plus a manual key/value memory store.
@@ -123,17 +124,23 @@ pnpm --filter kyokao start -p groq -m llama-3.3-70b-versatile "inspect this repo
 
 `kyokao --help` is the installed CLI’s authoritative command list. The global options are:
 
-| Option                  | Meaning                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `-m, --model <id>`      | Model ID or configured alias.                                                                          |
-| `-p, --provider <name>` | Built-in preset or configured provider name.                                                           |
-| `--base-url <url>`      | Override the selected provider base URL for this invocation.                                           |
-| `--api-key <key>`       | Override the API key for this invocation; it is not persisted. Avoid putting secrets in shell history. |
-| `--approval <mode>`     | `suggest`, `auto-edit`, or `full-auto`.                                                                |
-| `--profile <name>`      | Select a configuration profile.                                                                        |
-| `--max-iterations <n>`  | Agent loop limit; an integer from 1 through 100.                                                       |
-| `-V, --version`         | Print the CLI version.                                                                                 |
-| `-h, --help`            | Print help.                                                                                            |
+| Option                   | Meaning                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `-m, --model <id>`       | Model ID or configured alias.                                                                          |
+| `-p, --provider <name>`  | Built-in preset or configured provider name.                                                           |
+| `--base-url <url>`       | Override the selected provider base URL for this invocation.                                           |
+| `--api-key <key>`        | Override the API key for this invocation; it is not persisted. Avoid putting secrets in shell history. |
+| `--approval <mode>`      | `suggest`, `auto-edit`, or `full-auto`.                                                                |
+| `--profile <name>`       | Select a configuration profile.                                                                        |
+| `--max-iterations <n>`   | Agent loop limit; an integer from 1 through 100.                                                       |
+| `--temperature <n>`      | Sampling temperature from 0 through 2.                                                                 |
+| `--max-tokens <n>`       | Maximum completion tokens.                                                                             |
+| `--top-p <n>`            | Nucleus sampling probability from greater than 0 through 1.                                            |
+| `--fallback-model <ids>` | Comma-separated model IDs to try after a provider failure.                                             |
+| `--editor <command>`     | Editor command for this invocation.                                                                    |
+| `--max-cost <usd>`       | Stop after the estimated run cost reaches this amount; 0 means unlimited.                              |
+| `-V, --version`          | Print the CLI version.                                                                                 |
+| `-h, --help`             | Print help.                                                                                            |
 
 The default invocation accepts `[prompt...]`: with words it runs them as one prompt; without words it starts `chat` in a TTY, or reads all piped standard input otherwise.
 
@@ -146,6 +153,7 @@ The default invocation accepts `[prompt...]`: with words it runs them as one pro
 | `usage [id]`               | Prints saved token, cost, and compression usage for one or all sessions.                                   | `kyokao usage`                                                  |
 | `plugins`                  | Lists configured JavaScript/TypeScript plugin modules.                                                     | `kyokao plugins`                                                |
 | `mcp`                      | Lists configured MCP stdio servers.                                                                        | `kyokao mcp`                                                    |
+| `edit <path>`              | Opens a workspace file in the configured editor.                                                           | `kyokao edit src/index.ts`                                      |
 | `providers`                | Prints built-in preset names and base URLs.                                                                | `kyokao providers`                                              |
 | `config show`              | Prints the resolved non-profile config with key/token/secret/password fields redacted.                     | `kyokao config show`                                            |
 | `config path`              | Prints the global config path.                                                                             | `kyokao config path`                                            |
@@ -236,8 +244,8 @@ Kyokao reads JSON only. Configuration is resolved in this order, with later defi
 2. Global configuration.
 3. Project `.kyokao.json` in the current working directory.
 4. The selected profile, if `--profile <name>` names an existing profile.
-5. Environment: `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, and `KYOKAO_MAX_ITERATIONS`.
-6. CLI options, including `--context-window` and `--skip-model-check`.
+5. Environment: `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, `KYOKAO_TEMPERATURE`, `KYOKAO_MAX_TOKENS`, `KYOKAO_TOP_P`, and `KYOKAO_FALLBACK_MODELS`.
+6. CLI options, including `--context-window`, model sampling flags, editor selection, and safety limits.
 
 Global configuration paths are:
 
@@ -251,7 +259,7 @@ Use `kyokao config path` to print the active platform global path. The applicati
 
 ### Schema and examples
 
-The supported top-level keys are `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, and `compressionThreshold`. `approval` must be `suggest`, `auto-edit`, or `full-auto`; `maxIterations` must be an integer from 1 to 100. `contextWindow` must be at least 1000, and `compressionThreshold` must be between 0 and 1. Provider entries allow only string `baseURL`, `apiKey`, and `model` fields. Alias values and plugin paths are strings.
+The supported top-level keys are `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. `approval` must be `suggest`, `auto-edit`, or `full-auto`; `maxIterations` must be an integer from 1 to 100. `contextWindow` must be at least 1000, and `compressionThreshold` must be between 0 and 1. Provider entries can override `baseURL`, `apiKey`, `model`, `temperature`, `maxTokens`, `topP`, and `fallbackModels`. Alias values and plugin paths are strings.
 
 A project configuration without secrets:
 
@@ -263,6 +271,19 @@ A project configuration without secrets:
   "maxIterations": 12,
   "contextWindow": 16000,
   "compressionThreshold": 0.8,
+  "temperature": 0.2,
+  "maxTokens": 2000,
+  "fallbackModels": ["gpt-4o"],
+  "editor": "code",
+  "editorArgs": ["--wait"],
+  "limits": {
+    "maxToolCalls": 100,
+    "maxShellTimeoutMs": 120000,
+    "maxOutputChars": 30000,
+    "maxFileBytes": 2000000,
+    "maxCostUsd": 5,
+    "allowedHosts": ["api.example.com"]
+  },
   "aliases": {
     "fast": "gpt-4o-mini"
   },
@@ -333,6 +354,12 @@ MCP servers use the stdio transport and are configured under `mcp`:
 
 MCP tools are namespaced as `mcp_<server>_<tool>` before they reach the model. Server processes inherit the current environment plus configured `env` values and are terminated when the CLI exits.
 
+### Editor and repository instructions
+
+`edit <path>` uses `editor`, then `VISUAL`, then `EDITOR`, and finally `vi` (or `notepad` on Windows). `editorArgs` are appended to the command; include `{file}` when the editor needs the file in a specific argument position, otherwise Kyokao appends it.
+
+At startup Kyokao loads instruction files from the workspace root in this order: `SOUL.md`, `CLAUDE.md`, `AGENTS.md`, `KYOKAO.md`, and `.kyokao/instructions.md` or `.kyokao/soul.md`. Case variants are accepted and duplicate names are loaded once. Their content is bounded before it is added to the system prompt, while the session transcript remains unchanged.
+
 ## Approvals and safety
 
 Approval applies to the two file-mutation tools and the shell tool:
@@ -346,6 +373,8 @@ Approval applies to the two file-mutation tools and the shell tool:
 A prompt accepts `y` or `yes`; any other response denies the action. In a non-interactive standard input session, prompted actions are denied. Read/search tools, read-only Git subcommands, and HTTP GET do not ask for approval.
 
 `git` only permits the `status`, `diff`, `log`, `show`, and `branch` subcommands through its dedicated tool. A model can request a shell command such as `git commit`; that command is still subject to the shell approval rule above. `http_get` accepts only `http:` and `https:` URLs.
+
+The `limits` object adds hard runtime ceilings: tool calls per run, shell timeout, tool output size, file read/write size, estimated cost, and an optional HTTP host allowlist. `maxCostUsd: 0` disables the cost ceiling; an empty `allowedHosts` list preserves unrestricted HTTP(S) access. Plugin and MCP code is trusted extension code, but its returned output is still bounded before it enters model context.
 
 ## Sessions, memory, and workflows
 

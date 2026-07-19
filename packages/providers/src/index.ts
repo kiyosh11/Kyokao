@@ -89,11 +89,16 @@ export function toOpenAIMessage(message: ChatMessage): OpenAI.Chat.ChatCompletio
 }
 export class OpenAICompatibleProvider {
   private client?: OpenAI;
+  private fallbackIndex = -1;
   constructor(
     readonly options: {
       baseURL?: string;
       apiKey?: string;
       model: string;
+      temperature?: number;
+      maxTokens?: number;
+      topP?: number;
+      fallbackModels?: string[];
       fetch?: typeof fetch;
       stream?: boolean;
     },
@@ -135,6 +140,13 @@ export class OpenAICompatibleProvider {
       throw new Error(
         `Model "${this.options.model}" is not available at ${this.options.baseURL}. Run "kyokao models" to see available IDs.`,
       );
+    const unavailableFallback = (this.options.fallbackModels ?? []).find(
+      (model) => !models.includes(model),
+    );
+    if (unavailableFallback)
+      throw new Error(
+        `Fallback model "${unavailableFallback}" is not available at ${this.options.baseURL}. Remove it or use "kyokao models" to choose a valid fallback.`,
+      );
     return {
       id: match,
       ...modelCatalog.find((item) => item.id === match),
@@ -147,8 +159,15 @@ export class OpenAICompatibleProvider {
     events: StreamEvents = {},
     signal?: AbortSignal,
   ): Promise<ChatResponse> {
-    if (this.client) return this.sdkChat(messages, tools, events, signal);
-    return this.fetchChat(messages, tools, signal);
+    try {
+      if (this.client) return await this.sdkChat(messages, tools, events, signal);
+      return await this.fetchChat(messages, tools, signal);
+    } catch (error) {
+      const next = (this.options.fallbackModels ?? [])[this.fallbackIndex + 1];
+      if (!next || (error instanceof Error && error.name === 'AbortError')) throw error;
+      this.fallbackIndex += 1;
+      return this.chat(messages, tools, events, signal);
+    }
   }
   private async sdkChat(
     messages: ChatMessage[],
@@ -157,9 +176,12 @@ export class OpenAICompatibleProvider {
     signal?: AbortSignal,
   ): Promise<ChatResponse> {
     const request = {
-      model: this.options.model,
+      model: this.activeModel(),
       messages: messages.map(toOpenAIMessage),
       tools: tools as OpenAI.Chat.ChatCompletionTool[],
+      ...(this.options.temperature === undefined ? {} : { temperature: this.options.temperature }),
+      ...(this.options.maxTokens === undefined ? {} : { max_tokens: this.options.maxTokens }),
+      ...(this.options.topP === undefined ? {} : { top_p: this.options.topP }),
     };
     if (this.options.stream === false)
       return this.fromCompletion(
@@ -251,10 +273,15 @@ export class OpenAICompatibleProvider {
         headers: { ...this.headers(), 'content-type': 'application/json' },
         signal,
         body: JSON.stringify({
-          model: this.options.model,
+          model: this.activeModel(),
           messages: messages.map(toOpenAIMessage),
           tools,
           stream: false,
+          ...(this.options.temperature === undefined
+            ? {}
+            : { temperature: this.options.temperature }),
+          ...(this.options.maxTokens === undefined ? {} : { max_tokens: this.options.maxTokens }),
+          ...(this.options.topP === undefined ? {} : { top_p: this.options.topP }),
         }),
       },
     );
@@ -294,5 +321,10 @@ export class OpenAICompatibleProvider {
   }
   private headers(): Record<string, string> {
     return this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {};
+  }
+  private activeModel(): string {
+    return this.fallbackIndex < 0
+      ? this.options.model
+      : ((this.options.fallbackModels ?? [])[this.fallbackIndex] ?? this.options.model);
   }
 }

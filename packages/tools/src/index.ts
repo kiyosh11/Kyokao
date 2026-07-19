@@ -1,12 +1,14 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { McpServerConfig } from '@kyokao/config';
 const run = promisify(execFile);
-const MAX = 30_000;
+const DEFAULT_MAX_OUTPUT = 30_000;
+const DEFAULT_MAX_SHELL_TIMEOUT = 120_000;
+const DEFAULT_MAX_FILE_BYTES = 2_000_000;
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto';
 export type Approve = (action: string, detail: string) => Promise<boolean>;
 export interface ToolResult {
@@ -17,6 +19,12 @@ export interface ToolResult {
 export interface ToolDefinition {
   type: 'function';
   function: { name: string; description: string; parameters: object };
+}
+export interface ToolLimits {
+  maxShellTimeoutMs: number;
+  maxOutputChars: number;
+  maxFileBytes: number;
+  allowedHosts: string[];
 }
 export interface ToolExecutor {
   definitions(): ToolDefinition[];
@@ -29,7 +37,8 @@ export interface KyokaoPlugin {
   execute(name: string, args: Record<string, unknown>): Promise<ToolResult | undefined>;
   close?(): Promise<void>;
 }
-const clipped = (s: string) => (s.length > MAX ? `${s.slice(0, MAX)}\n…truncated…` : s);
+const clipped = (s: string, max = DEFAULT_MAX_OUTPUT) =>
+  s.length > max ? `${s.slice(0, max)}\n…truncated…` : s;
 const comparablePath = (path: string) => {
   const withoutDevicePrefix =
     process.platform === 'win32'
@@ -91,6 +100,12 @@ export class CoreTools implements ToolExecutor {
     private sandbox: WorkspaceSandbox,
     private approval: ApprovalMode,
     private approve: Approve = async () => false,
+    private limits: ToolLimits = {
+      maxShellTimeoutMs: DEFAULT_MAX_SHELL_TIMEOUT,
+      maxOutputChars: DEFAULT_MAX_OUTPUT,
+      maxFileBytes: DEFAULT_MAX_FILE_BYTES,
+      allowedHosts: [],
+    },
   ) {}
   definitions(): ToolDefinition[] {
     return [
@@ -181,7 +196,10 @@ export class CoreTools implements ToolExecutor {
     );
   }
   private async read(a: Record<string, unknown>): Promise<ToolResult> {
-    const text = await readFile(await this.sandbox.path(a.path), 'utf8');
+    const path = await this.sandbox.path(a.path);
+    if ((await stat(path)).size > this.limits.maxFileBytes)
+      throw new Error(`File exceeds safety limit of ${this.limits.maxFileBytes} bytes`);
+    const text = await readFile(path, 'utf8');
     const start = typeof a.startLine === 'number' ? a.startLine : 1,
       end = typeof a.endLine === 'number' ? a.endLine : undefined;
     const out = text
@@ -189,7 +207,7 @@ export class CoreTools implements ToolExecutor {
       .slice(start - 1, end)
       .map((l, i) => `${start + i}: ${l}`)
       .join('\n');
-    return { content: clipped(out) };
+    return { content: clipped(out, this.limits.maxOutputChars) };
   }
   private async list(a: Record<string, unknown>): Promise<ToolResult> {
     const depth = Math.min(typeof a.depth === 'number' ? a.depth : 2, 5),
@@ -203,7 +221,7 @@ export class CoreTools implements ToolExecutor {
       }
     };
     await walk(await this.sandbox.path(a.path ?? '.'), 0);
-    return { content: clipped(out.join('\n')), data: out };
+    return { content: clipped(out.join('\n'), this.limits.maxOutputChars), data: out };
   }
   private async glob(a: Record<string, unknown>): Promise<ToolResult> {
     if (typeof a.pattern !== 'string') throw new Error('pattern must be a string');
@@ -219,7 +237,7 @@ export class CoreTools implements ToolExecutor {
     const found = (tree.data as string[])
       .filter((x) => x.startsWith('f ') && regex.test(x.slice(2)))
       .map((x) => x.slice(2));
-    return { content: found.join('\n'), data: found };
+    return { content: clipped(found.join('\n'), this.limits.maxOutputChars), data: found };
   }
   private async grep(a: Record<string, unknown>): Promise<ToolResult> {
     if (typeof a.query !== 'string') throw new Error('query must be a string');
@@ -244,10 +262,12 @@ export class CoreTools implements ToolExecutor {
       }
     };
     await walk(root);
-    return { content: clipped(out.join('\n')), data: out };
+    return { content: clipped(out.join('\n'), this.limits.maxOutputChars), data: out };
   }
   private async write(a: Record<string, unknown>): Promise<ToolResult> {
     if (typeof a.content !== 'string') throw new Error('content must be a string');
+    if (Buffer.byteLength(a.content) > this.limits.maxFileBytes)
+      throw new Error(`File exceeds safety limit of ${this.limits.maxFileBytes} bytes`);
     const path = await this.sandbox.path(a.path);
     if (!(await this.allowed('write_file', path)))
       return { content: 'Permission denied', isError: true };
@@ -261,10 +281,15 @@ export class CoreTools implements ToolExecutor {
     const path = await this.sandbox.path(a.path);
     if (!(await this.allowed('apply_patch', path)))
       return { content: 'Permission denied', isError: true };
+    if ((await stat(path)).size > this.limits.maxFileBytes)
+      throw new Error(`File exceeds safety limit of ${this.limits.maxFileBytes} bytes`);
     const before = await readFile(path, 'utf8');
     if (!a.search || before.indexOf(a.search) !== before.lastIndexOf(a.search))
       return { content: 'Search text must occur exactly once', isError: true };
-    await writeFile(path, before.replace(a.search, a.replace));
+    const updated = before.replace(a.search, a.replace);
+    if (Buffer.byteLength(updated) > this.limits.maxFileBytes)
+      throw new Error(`File exceeds safety limit of ${this.limits.maxFileBytes} bytes`);
+    await writeFile(path, updated);
     return { content: `Patched ${String(a.path)}` };
   }
   private async shell(a: Record<string, unknown>): Promise<ToolResult> {
@@ -273,16 +298,25 @@ export class CoreTools implements ToolExecutor {
       return { content: 'Permission denied', isError: true };
     const timeout = Math.min(
       Math.max(typeof a.timeoutMs === 'number' ? a.timeoutMs : 30000, 1000),
-      120000,
+      this.limits.maxShellTimeoutMs,
     );
     const cmd = process.platform === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/sh',
       args = process.platform === 'win32' ? ['/d', '/s', '/c', a.command] : ['-lc', a.command];
     try {
-      const r = await run(cmd, args, { cwd: this.sandbox.root, timeout, maxBuffer: MAX });
-      return { content: clipped((r.stdout ?? '') + (r.stderr ?? '')) };
+      const r = await run(cmd, args, {
+        cwd: this.sandbox.root,
+        timeout,
+        maxBuffer: this.limits.maxOutputChars * 2,
+      });
+      return {
+        content: clipped((r.stdout ?? '') + (r.stderr ?? ''), this.limits.maxOutputChars),
+      };
     } catch (e: any) {
       return {
-        content: clipped(`${e.stdout ?? ''}${e.stderr ?? ''}\nexit code: ${e.code ?? 'unknown'}`),
+        content: clipped(
+          `${e.stdout ?? ''}${e.stderr ?? ''}\nexit code: ${e.code ?? 'unknown'}`,
+          this.limits.maxOutputChars,
+        ),
         isError: true,
       };
     }
@@ -297,15 +331,24 @@ export class CoreTools implements ToolExecutor {
         content: 'Only read-only git status/diff/log/show/branch are allowed',
         isError: true,
       };
-    const r = await run('git', a.args, { cwd: this.sandbox.root, timeout: 30000, maxBuffer: MAX });
-    return { content: clipped(r.stdout + r.stderr) };
+    const r = await run('git', a.args, {
+      cwd: this.sandbox.root,
+      timeout: 30000,
+      maxBuffer: this.limits.maxOutputChars * 2,
+    });
+    return { content: clipped(r.stdout + r.stderr, this.limits.maxOutputChars) };
   }
   private async http(a: Record<string, unknown>): Promise<ToolResult> {
     if (typeof a.url !== 'string') throw new Error('url must be a string');
     const url = new URL(a.url);
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP(S) URLs allowed');
+    if (this.limits.allowedHosts.length && !this.limits.allowedHosts.includes(url.hostname))
+      throw new Error(`Network host is not allowed: ${url.hostname}`);
     const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
-    return { content: clipped(await r.text()), isError: !r.ok };
+    return {
+      content: clipped(await r.text(), this.limits.maxOutputChars),
+      isError: !r.ok,
+    };
   }
 }
 

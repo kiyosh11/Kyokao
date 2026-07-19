@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import {
   loadConfig,
@@ -9,6 +10,7 @@ import {
   providerPresets,
   atomicWrite,
   globalConfigPath,
+  type KyokaoConfig,
 } from '@kyokao/config';
 import { OpenAICompatibleProvider, modelCatalog as builtInModelCatalog } from '@kyokao/providers';
 import {
@@ -19,7 +21,7 @@ import {
   loadPlugins,
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
-import { Agent } from '@kyokao/agent';
+import { Agent, loadInstructionFiles } from '@kyokao/agent';
 import { fullscreenChat, ui } from '@kyokao/ui';
 const program = new Command();
 program
@@ -34,8 +36,19 @@ program
   .option('--profile <name>', 'configuration profile')
   .option('--max-iterations <n>', 'agent iteration limit')
   .option('--context-window <n>', 'context token budget')
-  .option('--skip-model-check', 'skip provider model availability validation');
-function cliConfig() {
+  .option('--temperature <n>', 'sampling temperature (0–2)')
+  .option('--max-tokens <n>', 'maximum completion tokens')
+  .option('--top-p <n>', 'nucleus sampling probability (0–1)')
+  .option('--fallback-model <ids>', 'comma-separated fallback model IDs')
+  .option('--max-tool-calls <n>', 'maximum tool calls per run')
+  .option('--max-shell-timeout <ms>', 'maximum shell timeout in milliseconds')
+  .option('--max-output-chars <n>', 'maximum tool output characters')
+  .option('--max-file-bytes <n>', 'maximum file read/write size')
+  .option('--max-cost <usd>', 'maximum estimated run cost in USD')
+  .option('--allow-host <hosts>', 'comma-separated HTTP host allowlist')
+  .option('--skip-model-check', 'skip provider model availability validation')
+  .option('--editor <command>', 'editor command for the edit command');
+function cliConfig(): Partial<KyokaoConfig> {
   const o = program.opts();
   return {
     provider: o.provider,
@@ -43,22 +56,60 @@ function cliConfig() {
     approval: o.approval,
     maxIterations: o.maxIterations ? Number(o.maxIterations) : undefined,
     contextWindow: o.contextWindow ? Number(o.contextWindow) : undefined,
+    temperature: o.temperature ? Number(o.temperature) : undefined,
+    maxTokens: o.maxTokens ? Number(o.maxTokens) : undefined,
+    topP: o.topP ? Number(o.topP) : undefined,
+    fallbackModels: o.fallbackModel
+      ? String(o.fallbackModel)
+          .split(',')
+          .map((model) => model.trim())
+          .filter(Boolean)
+      : undefined,
+    limits: {
+      ...(o.maxToolCalls ? { maxToolCalls: Number(o.maxToolCalls) } : {}),
+      ...(o.maxShellTimeout ? { maxShellTimeoutMs: Number(o.maxShellTimeout) } : {}),
+      ...(o.maxOutputChars ? { maxOutputChars: Number(o.maxOutputChars) } : {}),
+      ...(o.maxFileBytes ? { maxFileBytes: Number(o.maxFileBytes) } : {}),
+      ...(o.maxCost ? { maxCostUsd: Number(o.maxCost) } : {}),
+      ...(o.allowHost
+        ? {
+            allowedHosts: String(o.allowHost)
+              .split(',')
+              .map((host) => host.trim())
+              .filter(Boolean),
+          }
+        : {}),
+    },
+    editor: o.editor,
     providers:
       o.baseUrl || o.apiKey
         ? { [o.provider ?? 'openai']: { baseURL: o.baseUrl, apiKey: o.apiKey } }
         : {},
-  };
+  } as Partial<KyokaoConfig>;
 }
 async function runtime() {
   const config = await loadConfig({ cli: cliConfig(), profile: program.opts().profile });
   const p = resolveProvider(config);
   const root = process.cwd();
   const store = new LocalStore(join(root, '.kyokao'));
-  const core = new CoreTools(new WorkspaceSandbox(root), config.approval, ui.approve);
+  const core = new CoreTools(new WorkspaceSandbox(root), config.approval, ui.approve, {
+    maxShellTimeoutMs: config.limits.maxShellTimeoutMs,
+    maxOutputChars: config.limits.maxOutputChars,
+    maxFileBytes: config.limits.maxFileBytes,
+    allowedHosts: config.limits.allowedHosts,
+  });
   const plugins = await loadPlugins(config.plugins, root);
   const mcp = await connectMcp(config.mcp, root);
   const tools = new CompositeTools([core, ...plugins, ...(mcp ? [mcp] : [])]);
-  return { config, store, provider: new OpenAICompatibleProvider(p), tools, root, core };
+  return {
+    config,
+    store,
+    provider: new OpenAICompatibleProvider(p),
+    tools,
+    root,
+    core,
+    instructions: await loadInstructionFiles(root),
+  };
 }
 async function runPrompt(
   r: Awaited<ReturnType<typeof runtime>>,
@@ -80,6 +131,10 @@ async function runPrompt(
       workspace: r.root,
       contextWindow: r.config.contextWindow,
       compressionThreshold: r.config.compressionThreshold,
+      instructions: r.instructions,
+      maxToolCalls: r.config.limits.maxToolCalls,
+      maxCostUsd: r.config.limits.maxCostUsd,
+      maxOutputChars: r.config.limits.maxOutputChars,
       modelInfo,
       onEvent: (k, t) =>
         k === 'text'
@@ -142,6 +197,31 @@ program.argument('[prompt...]', 'task for the agent').action(async (parts: strin
   }
 });
 program.command('chat').description('Start an interactive chat session').action(chat);
+program
+  .command('edit <path>')
+  .description('Open a workspace file in the configured editor')
+  .action(async (path: string) => {
+    const config = await loadConfig({ cli: cliConfig() });
+    const file = await new WorkspaceSandbox(process.cwd()).path(path);
+    const configured = config.editor || process.env.VISUAL || process.env.EDITOR;
+    const command = configured || (process.platform === 'win32' ? 'notepad' : 'vi');
+    const parts =
+      command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((part) => part.replace(/^(['"])|(['"])$/g, '')) ??
+      [];
+    const executable = parts.shift();
+    if (!executable) throw new Error('Editor command is empty');
+    const args = [...parts, ...config.editorArgs];
+    if (args.includes('{file}')) {
+      for (let i = 0; i < args.length; i++) if (args[i] === '{file}') args[i] = file;
+    } else args.push(file);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(executable, args, { stdio: 'inherit', cwd: process.cwd() });
+      child.once('error', reject);
+      child.once('exit', (code) =>
+        code === 0 ? resolve() : reject(new Error(`Editor exited with code ${code ?? 'unknown'}`)),
+      );
+    });
+  });
 program
   .command('tui')
   .description('Start the full-screen terminal chat interface')

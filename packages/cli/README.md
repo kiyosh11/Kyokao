@@ -12,11 +12,11 @@ pnpm --filter kyokao start -- "inspect this repository"
 # after packaging: kyokao "add a test"
 ```
 
-Run bare `kyokao` or `kyokao chat` in a TTY for a persistent interactive session (`/exit` leaves it), or use `kyokao tui` for the full-screen interface; provide a prompt or pipe stdin for one-shot execution. Use `kyokao --help`, `kyokao catalog`, `kyokao providers`, `kyokao models`, and `kyokao doctor`. Chat requests validate the selected model against the provider’s `/models` response unless `--skip-model-check` is supplied. `kyokao usage` reports provider usage when available and local estimates otherwise.
+Run bare `kyokao` or `kyokao chat` in a TTY for a persistent interactive session (`/exit` leaves it), or use `kyokao tui` for the full-screen interface; `kyokao edit <path>` opens a workspace file in the configured editor. Chat requests validate the selected model against the provider’s `/models` response unless `--skip-model-check` is supplied. Sampling parameters, fallback models, instruction files, and hard safety limits are configurable; `kyokao usage` reports provider usage when available and local estimates otherwise.
 
 ## Configuration
 
-Precedence is defaults, global (`$XDG_CONFIG_HOME/kyokao/config.json` or platform equivalent), project `.kyokao.json`, selected profile, environment, then CLI. Set `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_MAX_ITERATIONS`, and provider-specific keys (for example `OPENAI_API_KEY`). Config also supports `contextWindow`, `compressionThreshold`, `plugins`, and `mcp`; use `config export` only for redacted, non-secret sharing. Never put API keys in project config.
+Precedence is defaults, global (`$XDG_CONFIG_HOME/kyokao/config.json` or platform equivalent), project `.kyokao.json`, selected profile, environment, then CLI. Set `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, and provider-specific keys (for example `OPENAI_API_KEY`). Config also supports `contextWindow`, `compressionThreshold`, model sampling/fallback fields, `editor`/`editorArgs`, `limits`, `plugins`, and `mcp`; use `config export` only for redacted, non-secret sharing. Never put API keys in project config.
 
 ## Security model
 

@@ -13,7 +13,7 @@ import {
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
 import { OpenAICompatibleProvider, modelCatalog, toOpenAIMessage } from '@kyokao/providers';
-import { Agent, compressMessages, estimateTokens } from '@kyokao/agent';
+import { Agent, compressMessages, estimateTokens, loadInstructionFiles } from '@kyokao/agent';
 const servers: Server[] = [];
 afterEach(() => servers.splice(0).forEach((server) => server.close()));
 const event = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
@@ -54,6 +54,12 @@ describe('configuration', () => {
         contextWindow: 4000,
         compressionThreshold: 0.7,
         plugins: ['./plugin.mjs'],
+        editor: 'code',
+        editorArgs: ['--wait'],
+        temperature: 0.2,
+        maxTokens: 500,
+        fallbackModels: ['backup'],
+        limits: { maxToolCalls: 4, maxCostUsd: 1, allowedHosts: ['example.com'] },
         mcp: { demo: { command: 'demo-server', args: ['--stdio'] } },
       }),
     );
@@ -61,6 +67,9 @@ describe('configuration', () => {
     expect(config.contextWindow).toBe(4000);
     expect(config.mcp.demo.command).toBe('demo-server');
     expect(config.plugins).toEqual(['./plugin.mjs']);
+    expect(config.editorArgs).toEqual(['--wait']);
+    expect(config.temperature).toBe(0.2);
+    expect(config.limits.maxToolCalls).toBe(4);
   });
 });
 describe('sandbox and tools', () => {
@@ -79,6 +88,21 @@ describe('sandbox and tools', () => {
         })
       ).content,
     ).toContain('exit code');
+  });
+  it('enforces file and network safety limits', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const tools = new CoreTools(new WorkspaceSandbox(dir), 'full-auto', undefined, {
+      maxShellTimeoutMs: 1000,
+      maxOutputChars: 100,
+      maxFileBytes: 3,
+      allowedHosts: ['example.com'],
+    });
+    expect(
+      (await tools.execute('write_file', { path: 'large.txt', content: 'four' })).isError,
+    ).toBe(true);
+    expect(
+      (await tools.execute('http_get', { url: 'https://not-example.test' })).content,
+    ).toContain('not allowed');
   });
   it.skipIf(process.platform === 'win32')('canonicalizes a symlinked workspace root', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
@@ -282,5 +306,39 @@ describe('platform extensions', () => {
     ]);
     expect((await tools!.execute('mcp_demo_echo', {})).content).toBe('mcp ok');
     await tools?.close?.();
+  });
+  it('loads repository instruction files in deterministic order', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    await writeFile(join(dir, 'SOUL.md'), 'Be precise.');
+    await writeFile(join(dir, 'CLAUDE.md'), 'Run tests.');
+    await mkdir(join(dir, '.kyokao'));
+    await writeFile(join(dir, '.kyokao', 'instructions.md'), 'Prefer small patches.');
+    const instructions = await loadInstructionFiles(dir);
+    expect(instructions.indexOf('SOUL.md')).toBeLessThan(instructions.indexOf('CLAUDE.md'));
+    expect(instructions).toContain('Prefer small patches.');
+  });
+  it('falls back to the next model when a provider rejects the primary', async () => {
+    const bodies: any[] = [];
+    const provider = new OpenAICompatibleProvider({
+      baseURL: 'https://provider.test/v1',
+      model: 'primary',
+      fallbackModels: ['backup'],
+      stream: false,
+      fetch: (async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return bodies.length === 1
+          ? new Response('unavailable', { status: 503 })
+          : new Response(
+              JSON.stringify({
+                choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+              }),
+              { headers: { 'content-type': 'application/json' } },
+            );
+      }) as typeof fetch,
+    });
+    await expect(provider.chat([], [])).resolves.toMatchObject({
+      message: { content: 'ok' },
+    });
+    expect(bodies.map((body) => body.model)).toEqual(['primary', 'backup']);
   });
 });
