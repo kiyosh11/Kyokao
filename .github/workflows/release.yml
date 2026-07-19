@@ -18,12 +18,16 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: node20-linux-x64
+            extension: ''
           - runner: macos-15-intel
             target: node20-macos-x64
+            extension: ''
           - runner: macos-15
             target: node20-macos-arm64
+            extension: ''
           - runner: windows-latest
             target: node20-win-x64
+            extension: '.exe'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -42,45 +46,20 @@ jobs:
           }
       - run: pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build
       - name: Build standalone binary
-        id: binary
-        uses: yao-pkg/pkg-action@v1
-        with:
-          config: packages/cli/package.json
-          entry: packages/cli/dist/kyokao.cjs
-          targets: ${{ matrix.target }}
-          compress: zip
-          checksum: none
-          filename: kyokao-{version}-{os}-{arch}
-          windows-product-name: Kyokao
-          windows-file-description: Kyokao local-first coding agent
+        shell: bash
+        run: |
+          mkdir -p release-binary
+          pnpm dlx '@yao-pkg/pkg@~6.19.0' packages/cli/dist/kyokao.cjs \
+            --targets '${{ matrix.target }}' \
+            --output 'release-binary/kyokao${{ matrix.extension }}' \
+            --compress Brotli
       - name: Smoke test binary
         shell: bash
-        env:
-          BINARIES: ${{ steps.binary.outputs.binaries }}
-        run: |
-          node - <<'NODE'
-          const { spawnSync } = require('node:child_process');
-          const [binary] = JSON.parse(process.env.BINARIES);
-          const result = spawnSync(binary, ['--version'], { stdio: 'inherit' });
-          process.exit(result.status ?? 1);
-          NODE
-      - name: Collect release asset
-        shell: bash
-        env:
-          ARTIFACTS: ${{ steps.binary.outputs.artifacts }}
-        run: |
-          node - <<'NODE'
-          const { copyFileSync, mkdirSync } = require('node:fs');
-          const { basename, join } = require('node:path');
-          mkdirSync('release-assets', { recursive: true });
-          for (const artifact of JSON.parse(process.env.ARTIFACTS)) {
-            copyFileSync(artifact, join('release-assets', basename(artifact)));
-          }
-          NODE
+        run: ./release-binary/kyokao${{ matrix.extension }} --version
       - uses: actions/upload-artifact@v4
         with:
-          name: kyokao-${{ matrix.target }}
-          path: release-assets/*.zip
+          name: binary-${{ matrix.target }}
+          path: release-binary/*
           if-no-files-found: error
           retention-days: 7
 
@@ -93,12 +72,23 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: kyokao-*
-          path: release-assets
-          merge-multiple: true
-      - name: Generate checksums
+          pattern: binary-*
+          path: release-binaries
+      - name: Create release archives and checksums
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p release-assets
+          for directory in release-binaries/binary-node20-*; do
+            target="${directory##*/binary-node20-}"
+            archive="${GITHUB_WORKSPACE}/release-assets/kyokao-${VERSION#v}-${target}.zip"
+            (cd "${directory}" && zip -q "${archive}" ./*)
+          done
+          sha256sum release-assets/*.zip > release-assets/SHA256SUMS.txt
+      - name: Verify release assets
         working-directory: release-assets
-        run: sha256sum *.zip > SHA256SUMS.txt
+        run: sha256sum --check SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           name: Kyokao ${{ github.ref_name }}
