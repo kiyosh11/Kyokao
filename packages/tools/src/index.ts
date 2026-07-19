@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { realpathSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
@@ -49,18 +48,19 @@ const spec = (
 export class WorkspaceSandbox {
   readonly root: string;
   constructor(root: string) {
-    this.root = realpathSync(resolve(root));
+    this.root = resolve(root);
   }
   async path(input: unknown): Promise<string> {
     if (typeof input !== 'string' || !input || input.includes('\0'))
       throw new Error('path must be a non-empty string');
     const target = resolve(this.root, input);
     if (!isWithin(this.root, target)) throw new Error('Path escapes workspace');
+    const canonicalRoot = await realpath(this.root);
     let ancestor = target;
     while (true) {
       try {
         const actual = await realpath(ancestor);
-        if (!isWithin(this.root, actual)) throw new Error('Symlink escapes workspace');
+        if (!isWithin(canonicalRoot, actual)) throw new Error('Symlink escapes workspace');
         break;
       } catch (e: any) {
         if (e.code !== 'ENOENT') throw e;
