@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { McpServerConfig } from '@kyokao/config';
 const run = promisify(execFile);
@@ -403,7 +402,7 @@ export async function loadPlugins(paths: string[], cwd = process.cwd()): Promise
   const loaded: ToolExecutor[] = [];
   for (const rawPath of paths) {
     const path = resolve(cwd, rawPath);
-    const module = await import(/* @vite-ignore */ pathToFileURL(path).href);
+    const module = await import(/* @vite-ignore */ path);
     const plugin = (module.default ?? module.plugin) as Partial<KyokaoPlugin> | undefined;
     if (
       !plugin ||
