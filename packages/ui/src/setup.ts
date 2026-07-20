@@ -1,4 +1,14 @@
 import type { ReadStream, WriteStream } from 'node:tty';
+import {
+  displayWidth,
+  graphemes,
+  graphemeWidth,
+  padDisplay,
+  TerminalInputParser,
+  truncateDisplay,
+  type InputEvent,
+} from './editor.js';
+import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
 import { theme } from './theme.js';
 
 export type SetupStep =
@@ -33,6 +43,7 @@ export interface SetupWizardOptions {
     signal: AbortSignal;
   }) => Promise<string[]>;
   confirmReplace?: boolean;
+  screen?: InteractiveScreen;
 }
 export const approvalChoices = [
   { value: 'suggest', description: 'Propose changes; ask before every edit or command.' },
@@ -71,7 +82,7 @@ export function setupWordmark(width: number): string[] {
       ];
 }
 function fit(value: string, width: number) {
-  return value.length > width ? `${value.slice(0, Math.max(0, width - 1))}…` : value;
+  return truncateDisplay(value, width);
 }
 export function visibleSetupItems<T>(
   items: readonly T[],
@@ -88,7 +99,7 @@ export function visibleSetupItems<T>(
     after: start + size < items.length,
   };
 }
-export function renderSetupScreen(input: {
+export function renderSetupFrame(input: {
   width: number;
   height?: number;
   step: SetupStep;
@@ -100,26 +111,31 @@ export function renderSetupScreen(input: {
   message?: string;
   review?: string[];
   busy?: boolean;
-}): string {
-  const width = Math.max(24, input.width);
+}): ScreenFrame {
+  const width = Math.max(12, input.width);
   const inner = width - 4;
-  const height = Math.max(12, input.height ?? 28);
+  const height = Math.max(8, input.height ?? 28);
   const line = '─'.repeat(width - 2);
   const rows = [...setupWordmark(width - 4), '', input.title];
   if (input.items) {
-    const window = visibleSetupItems(input.items, input.selected ?? 0, height, rows.length + 5);
+    const window = visibleSetupItems(input.items, input.selected ?? 0, height, rows.length + 6);
     if (window.before) rows.push(theme.muted('  ↑ more'));
     window.items.forEach((item, offset) => {
       const index = window.start + offset;
-      const text = `${index === input.selected ? '›' : ' '} ${fit(item.name, Math.max(8, inner - 2))}${item.description ? ` — ${fit(item.description, Math.max(6, inner - item.name.length - 6))}` : ''}`;
+      const nameWidth = Math.max(4, Math.min(inner - 2, Math.floor(inner * 0.42)));
+      const text = `${index === input.selected ? '›' : ' '} ${padDisplay(item.name, nameWidth)}${item.description ? ` — ${fit(item.description, Math.max(1, inner - nameWidth - 5))}` : ''}`;
       rows.push(
         item.danger ? theme.error(text) : index === input.selected ? theme.user(text) : text,
       );
     });
     if (window.after) rows.push(theme.muted('  ↓ more'));
   }
-  if (input.value !== undefined)
-    rows.push('', `› ${input.secret ? maskSecret(input.value) : fit(input.value, inner - 2)}`);
+  let inputRow: number | undefined;
+  if (input.value !== undefined) {
+    rows.push('');
+    inputRow = rows.length;
+    rows.push(`› ${input.secret ? maskSecret(input.value) : fit(input.value, inner - 2)}`);
+  }
   if (input.review) rows.push('', ...input.review.map((row) => fit(row, inner)));
   if (input.message) rows.push('', input.message);
   const controls = input.busy
@@ -129,26 +145,47 @@ export function renderSetupScreen(input: {
       : input.items
         ? '↑/↓ or j/k move · Enter choose · Esc back · Ctrl-C cancel'
         : 'Enter continue · Esc back · Ctrl-C cancel';
-  return [
-    `\x1b[?25l\x1b[H\x1b[2J${theme.muted(`╭${line}╮`)}`,
-    ...rows.map(
-      (row) =>
-        `│ ${row}${' '.repeat(Math.max(0, inner - row.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').length))} │`,
-    ),
+  const contentRows = Math.max(1, height - 4);
+  const visibleRows = rows.slice(0, contentRows);
+  while (visibleRows.length < contentRows) visibleRows.push('');
+  const lines = [
+    theme.muted(`╭${line}╮`),
+    ...visibleRows.map((row) => `│ ${padDisplay(row, inner)} │`),
     theme.muted(`├${line}┤`),
-    `│ ${theme.muted(fit(controls, inner)).padEnd(inner)} │`,
+    `│ ${theme.muted(padDisplay(controls, inner))} │`,
     theme.muted(`╰${line}╯`),
-  ].join('\n');
+  ];
+  if (lines.length > height) lines.splice(1 + contentRows, lines.length - height);
+  const cursor =
+    inputRow === undefined || input.busy
+      ? undefined
+      : {
+          row: Math.min(height - 3, 1 + inputRow),
+          column: Math.min(
+            width - 3,
+            2 +
+              displayWidth('› ') +
+              (input.secret
+                ? displayWidth(maskSecret(input.value ?? ''))
+                : graphemes(input.value ?? '').reduce(
+                    (sum, value) => sum + graphemeWidth(value),
+                    0,
+                  )),
+          ),
+        };
+  return { lines, cursor };
 }
-export async function setupWizard(options: SetupWizardOptions): Promise<SetupResult | undefined> {
-  const input = options.input ?? process.stdin;
-  const output = options.output ?? process.stdout;
-  if (!input.isTTY || !output.isTTY)
-    throw new Error(
-      'interactive setup requires a TTY; set KYOKAO_PROVIDER and provider settings, or run `kyokao config setup` in a terminal',
-    );
-  const previousRaw = input.isRaw;
-  const previousEncoding = input.readableEncoding;
+
+export function renderSetupScreen(input: Parameters<typeof renderSetupFrame>[0]): string {
+  return renderSetupFrame(input).lines.join('\n');
+}
+
+async function runSetupWizard(
+  options: SetupWizardOptions,
+  screen: InteractiveScreen,
+): Promise<SetupResult | undefined> {
+  const input = screen.input;
+  const output = screen.output;
   let step: SetupStep = options.confirmReplace ? 'confirm' : 'provider';
   let selected = options.confirmReplace ? 1 : 0;
   let value = '';
@@ -168,7 +205,7 @@ export async function setupWizard(options: SetupWizardOptions): Promise<SetupRes
     const width = output.columns ?? 80;
     const height = output.rows ?? 28;
     const screen = (title: string, extra: Partial<Parameters<typeof renderSetupScreen>[0]>) =>
-      output.write(renderSetupScreen({ width, height, step, title, message, busy, ...extra }));
+      screenOutput.draw(renderSetupFrame({ width, height, step, title, message, busy, ...extra }));
     if (step === 'confirm')
       return screen('Replace active provider settings?', {
         items: [
@@ -335,12 +372,15 @@ export async function setupWizard(options: SetupWizardOptions): Promise<SetupRes
     value = '';
     return true;
   };
-  input.setRawMode(true);
-  input.setEncoding('utf8');
-  input.resume();
-  draw();
+  const screenOutput = screen;
+  const onResize = () => draw();
+  output.on('resize', onResize);
   let dataListener: ((chunk: string) => void) | undefined;
+  let streamFinish: (() => void) | undefined;
+  let escapeTimer: ReturnType<typeof setTimeout> | undefined;
+  const parser = new TerminalInputParser();
   try {
+    draw();
     return await new Promise<SetupResult | undefined>((resolve) => {
       const finish = (result?: SetupResult) => {
         if (closed) return;
@@ -348,82 +388,116 @@ export async function setupWizard(options: SetupWizardOptions): Promise<SetupRes
         fetchController?.abort();
         resolve(result);
       };
-      const onData = (chunk: string) => {
-        const keys = chunk === '\u001b[A' || chunk === '\u001b[B' ? [chunk] : Array.from(chunk);
-        for (const char of keys) {
-          if (char === '\u0003') return finish();
-          if (busy) continue;
-          if (char === '\u001b') {
-            if (!back()) finish();
-            else draw();
-            continue;
-          }
-          if (step === 'review' && (char === '\r' || char === '\n'))
-            return finish({ provider: providerName, baseURL, model, approval, apiKey, keySource });
-          const listLength =
-            step === 'confirm'
-              ? 2
-              : step === 'provider'
-                ? options.providers.length
-                : step === 'approval'
-                  ? approvalChoices.length
-                  : step === 'model' && models.length
-                    ? models.length + 1
-                    : 0;
-          if (
-            listLength &&
-            (char === '\u001b[A' || char === 'k' || char === '\u001b[B' || char === 'j')
-          ) {
-            selected = setupSelect(
-              selected,
-              char === '\u001b[A' || char === 'k' ? -1 : 1,
-              listLength,
-            );
-            draw();
-            continue;
-          }
-          if (char === '\r' || char === '\n') {
-            if (step === 'model' && !models.length) {
-              if (!value.trim()) {
-                message = 'Enter a model ID.';
-                draw();
-                continue;
-              }
-              model = value.trim();
-              value = '';
-              selected = 0;
-              step = 'approval';
-              draw();
-              continue;
-            }
-            busy = true;
-            void advance().then((keep) => {
-              if (!closed) {
-                busy = false;
-                if (keep === false) finish();
-                else draw();
-              }
-            });
-            draw();
-            continue;
-          }
-          if (!listLength) {
-            if (char === '\u007f') value = value.slice(0, -1);
-            else if (char >= ' ') value += char;
-            draw();
-          }
+      streamFinish = () => finish();
+      const handleEvent = (event: InputEvent) => {
+        if (event.type === 'key' && event.key === 'interrupt') return finish();
+        if (busy) return;
+        if (event.type === 'key' && event.key === 'escape') {
+          if (!back()) finish();
+          else draw();
+          return;
         }
+        if (
+          step === 'review' &&
+          event.type === 'key' &&
+          (event.key === 'enter' || event.key === 'newline')
+        )
+          return finish({ provider: providerName, baseURL, model, approval, apiKey, keySource });
+        const listLength =
+          step === 'confirm'
+            ? 2
+            : step === 'provider'
+              ? options.providers.length
+              : step === 'approval'
+                ? approvalChoices.length
+                : step === 'model' && models.length
+                  ? models.length + 1
+                  : 0;
+        const listDelta =
+          event.type === 'key' && event.key === 'up'
+            ? -1
+            : event.type === 'key' && event.key === 'down'
+              ? 1
+              : event.type === 'text' && event.text === 'k'
+                ? -1
+                : event.type === 'text' && event.text === 'j'
+                  ? 1
+                  : 0;
+        if (listLength && listDelta) {
+          selected = setupSelect(selected, listDelta, listLength);
+          draw();
+          return;
+        }
+        if (event.type === 'key' && (event.key === 'enter' || event.key === 'newline')) {
+          if (step === 'model' && !models.length) {
+            if (!value.trim()) {
+              message = 'Enter a model ID.';
+              draw();
+              return;
+            }
+            model = value.trim();
+            value = '';
+            selected = 0;
+            step = 'approval';
+            draw();
+            return;
+          }
+          busy = true;
+          void advance().then((keep) => {
+            if (!closed) {
+              busy = false;
+              if (keep === false) finish();
+              else draw();
+            }
+          });
+          draw();
+          return;
+        }
+        if (!listLength) {
+          if (event.type === 'key' && event.key === 'backspace')
+            value = graphemes(value).slice(0, -1).join('');
+          else if (event.type === 'text') value += event.text;
+          else if (event.type === 'paste') value += event.text.replace(/[\r\n]/g, '');
+          draw();
+        }
+      };
+      const onData = (chunk: string) => {
+        if (escapeTimer) clearTimeout(escapeTimer);
+        for (const event of parser.feed(chunk)) handleEvent(event);
+        escapeTimer = setTimeout(() => {
+          escapeTimer = undefined;
+          for (const event of parser.flushEscape()) handleEvent(event);
+        }, 25);
       };
       dataListener = onData;
       input.on('data', onData);
-      input.once('close', () => finish());
-      input.once('error', () => finish());
+      input.once('close', streamFinish);
+      input.once('error', streamFinish);
+      output.once('close', streamFinish);
+      output.once('error', streamFinish);
     });
   } finally {
+    if (escapeTimer) clearTimeout(escapeTimer);
     if (dataListener) input.removeListener('data', dataListener);
-    input.setRawMode(previousRaw ?? false);
-    if (previousEncoding) input.setEncoding(previousEncoding);
-    input.pause();
-    output.write('\x1b[?25h\n');
+    if (streamFinish) {
+      input.removeListener('close', streamFinish);
+      input.removeListener('error', streamFinish);
+      output.removeListener('close', streamFinish);
+      output.removeListener('error', streamFinish);
+    }
+    output.removeListener('resize', onResize);
   }
+}
+
+export async function setupWizard(options: SetupWizardOptions): Promise<SetupResult | undefined> {
+  if (options.screen) return await runSetupWizard(options, options.screen);
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stdout;
+  if (!input.isTTY || !output.isTTY)
+    throw new Error(
+      'interactive setup requires a TTY; set KYOKAO_PROVIDER and provider settings, or run `kyokao config setup` in a terminal',
+    );
+  return await withInteractiveScreen({ input, output }, async (screen) => {
+    return await runSetupWizard(options, screen);
+  });
 }

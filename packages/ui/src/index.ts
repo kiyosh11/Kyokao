@@ -1,8 +1,22 @@
 import pc from 'picocolors';
 import { createInterface } from 'node:readline/promises';
 import type { ReadStream, WriteStream } from 'node:tty';
+import {
+  displayWidth,
+  EditorState,
+  layoutEditor,
+  padDisplay,
+  TerminalInputParser,
+  truncateDisplay,
+  graphemes,
+  graphemeWidth,
+  type InputEvent,
+} from './editor.js';
+import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
 import { theme } from './theme.js';
 export { theme } from './theme.js';
+export * from './editor.js';
+export * from './terminal.js';
 
 const keywords =
   /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|from|export|async|await|new|true|false|null|undefined)\b/g;
@@ -117,27 +131,33 @@ export interface TranscriptEntry {
 }
 
 export function layoutWorkspace(width: number, height: number, paletteRows = 0) {
-  const safeWidth = Math.max(24, width);
+  const safeWidth = Math.max(12, width);
   return {
     width: safeWidth,
-    contentWidth: Math.max(16, safeWidth - 6),
-    transcriptHeight: Math.max(3, height - 10 - paletteRows),
+    contentWidth: Math.max(6, safeWidth - 4),
+    transcriptHeight: Math.max(1, height - 9 - paletteRows),
   };
 }
 
 export function wrapWorkspaceText(value: string, width: number): string[] {
+  const safeWidth = Math.max(1, width);
   const rows: string[] = [];
   for (const source of value.split('\n')) {
     if (!source) {
       rows.push('');
       continue;
     }
-    let line = source;
-    while (line.length > width) {
-      const split = line.lastIndexOf(' ', width);
-      const at = split > 0 ? split : width;
-      rows.push(line.slice(0, at));
-      line = line.slice(at).trimStart();
+    let line = '';
+    let cells = 0;
+    for (const value of graphemes(source)) {
+      const next = graphemeWidth(value);
+      if (line && cells + next > safeWidth) {
+        rows.push(line);
+        line = '';
+        cells = 0;
+      }
+      line += value;
+      cells += next;
     }
     rows.push(line);
   }
@@ -145,7 +165,7 @@ export function wrapWorkspaceText(value: string, width: number): string[] {
 }
 
 export function renderTranscript(entries: TranscriptEntry[], width: number): string[] {
-  const contentWidth = Math.max(12, width - 6);
+  const contentWidth = Math.max(4, width - 4);
   return entries.flatMap((entry) => {
     const label =
       entry.kind === 'user'
@@ -191,6 +211,7 @@ export interface WorkspaceCommandResult {
 export interface TerminalWorkspaceOptions {
   input?: ReadStream;
   output?: WriteStream;
+  screen?: InteractiveScreen;
   header: () => WorkspaceHeader;
   onPrompt: (
     prompt: string,
@@ -204,17 +225,183 @@ export interface TerminalWorkspaceOptions {
   ) => Promise<WorkspaceCommandResult | void>;
 }
 
-export async function terminalWorkspace(options: TerminalWorkspaceOptions): Promise<void> {
-  const input = options.input ?? process.stdin;
-  const output = options.output ?? process.stdout;
-  if (!input.isTTY || !output.isTTY) throw new Error('interactive workspace requires a TTY');
-  const previousRaw = input.isRaw;
-  const previousEncoding = input.readableEncoding;
-  let buffer = '';
+export interface WorkspaceRenderState {
+  width: number;
+  height: number;
+  header: WorkspaceHeader;
+  transcript: TranscriptEntry[];
+  editor: EditorState;
+  busy?: boolean;
+  busyKind?: 'prompt' | 'command';
+  approval?: { action: string; detail: string };
+  scrollOffset?: number;
+  paletteIndex?: number;
+  animationFrame?: number;
+}
+
+function border(width: number, left: string, right: string, label = ''): string {
+  const inner = Math.max(0, width - 2);
+  const fitted = label ? ` ${truncateDisplay(label, Math.max(0, inner - 2))} ` : '';
+  return `${left}${fitted}${'─'.repeat(Math.max(0, inner - displayWidth(fitted)))}${right}`;
+}
+
+function framed(value: string, width: number): string {
+  return `│${padDisplay(` ${value}`, Math.max(0, width - 2))}│`;
+}
+
+export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame & {
+  palette: CommandDefinition[];
+  transcriptHeight: number;
+} {
+  const width = Math.max(12, state.width);
+  const height = Math.max(8, state.height);
+  const inner = width - 2;
+  const matches =
+    state.editor.text.startsWith('/') && !state.busy
+      ? filterWorkspaceCommands(state.editor.text)
+      : [];
+  const paletteIndex = selectPalette(state.paletteIndex ?? 0, 0, matches.length);
+  const editorLayout = layoutEditor(state.editor.text, state.editor.cursor, Math.max(1, inner - 1));
+  const maxComposerRows = Math.max(1, Math.floor(height / 3));
+  const composerRows = Math.min(editorLayout.rows.length, maxComposerRows);
+  const composerStart = Math.max(
+    0,
+    Math.min(editorLayout.cursor.row - composerRows + 1, editorLayout.rows.length - composerRows),
+  );
+  const visibleComposer = editorLayout.rows.slice(composerStart, composerStart + composerRows);
+  const footerRows = height >= 9 ? 1 : 0;
+  const fixedRows = 6 + composerRows + footerRows;
+  const paletteLimit = Math.max(0, Math.min(5, height - fixedRows - 2));
+  const paletteWindow = visiblePaletteCommands(matches, paletteIndex, Math.max(1, paletteLimit));
+  const paletteRows = matches.length && paletteLimit ? paletteWindow.commands.length : 0;
+  const paletteBlock = paletteRows ? paletteRows + 1 : 0;
+  const transcriptHeight = Math.max(1, height - fixedRows - paletteBlock);
+  const renderedTranscript = renderTranscript(state.transcript, width);
+  const maxScroll = Math.max(0, renderedTranscript.length - transcriptHeight);
+  const scrollOffset = Math.min(state.scrollOffset ?? 0, maxScroll);
+  const end = renderedTranscript.length - scrollOffset;
+  const visibleTranscript = renderedTranscript.slice(Math.max(0, end - transcriptHeight), end);
+  const transcriptRows = visibleTranscript.map((row) => framed(row, width));
+  while (transcriptRows.length < transcriptHeight) transcriptRows.push(framed('', width));
+
+  const title = `KYOKAO  ${state.header.workspace}`;
+  const meta = `${state.header.provider}/${state.header.model} · ${state.header.approval}`;
+  const fittedMeta = truncateDisplay(meta, Math.max(1, Math.floor(inner * 0.55)));
+  const fittedTitle = truncateDisplay(title, Math.max(1, inner - displayWidth(fittedMeta) - 1));
+  const headerGap = ' '.repeat(
+    Math.max(1, inner - displayWidth(fittedTitle) - displayWidth(fittedMeta)),
+  );
+  const status = state.approval
+    ? `${state.approval.action}: ${state.approval.detail} [y/N]`
+    : state.busy
+      ? state.busyKind === 'command'
+        ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
+        : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
+      : scrollOffset
+        ? `Viewing earlier output (${scrollOffset} lines) · End returns`
+        : 'Ready';
+  const lines = [
+    theme.muted(border(width, '╭', '╮')),
+    `│${theme.brand(fittedTitle)}${headerGap}${theme.muted(fittedMeta)}│`,
+    theme.muted(border(width, '├', '┤')),
+    ...transcriptRows,
+    framed(truncateDisplay(status, inner - 1), width),
+  ];
+  if (paletteRows) {
+    lines.push(theme.muted(border(width, '├', '┤', 'Commands')));
+    for (const [index, item] of paletteWindow.commands.entries()) {
+      const absoluteIndex = paletteWindow.start + index;
+      const marker = absoluteIndex === paletteIndex ? '›' : ' ';
+      const syntaxWidth = Math.min(
+        Math.max(4, displayWidth(item.syntax)),
+        Math.max(4, Math.floor((inner - 4) * 0.45)),
+      );
+      const syntax = padDisplay(item.syntax, syntaxWidth);
+      lines.push(
+        framed(
+          `${marker} ${syntax} ${truncateDisplay(item.description, inner - syntaxWidth - 4)}`,
+          width,
+        ),
+      );
+    }
+  }
+  lines.push(theme.muted(border(width, '├', '┤', 'Prompt')));
+  for (const row of visibleComposer) lines.push(framed(row, width));
+  lines.push(theme.muted(border(width, '╰', '╯')));
+  if (footerRows)
+    lines.push(
+      padDisplay(
+        state.busy
+          ? state.busyKind === 'command'
+            ? 'Command running'
+            : 'Ctrl-C cancel'
+          : 'Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit',
+        width,
+      ),
+    );
+  while (lines.length < height) lines.splice(3, 0, framed('', width));
+  if (lines.length > height) lines.splice(3, lines.length - height);
+  const composerTop = 3 + transcriptHeight + 1 + paletteBlock + 1;
+  const cursor = state.busy
+    ? undefined
+    : {
+        row: composerTop + editorLayout.cursor.row - composerStart,
+        column: Math.min(width - 2, 2 + editorLayout.cursor.column),
+      };
+  return { lines, cursor, palette: matches, transcriptHeight };
+}
+
+class PromptHistory {
+  private entries: string[] = [];
+  private index: number | undefined;
+  private draft = '';
+
+  get browsing(): boolean {
+    return this.index !== undefined;
+  }
+
+  add(value: string): void {
+    if (value && this.entries.at(-1) !== value) this.entries.push(value);
+    this.index = undefined;
+    this.draft = '';
+  }
+
+  browse(delta: -1 | 1, current: string): string {
+    if (!this.entries.length) return current;
+    if (this.index === undefined) {
+      if (delta > 0) return current;
+      this.draft = current;
+      this.index = this.entries.length - 1;
+    } else {
+      const next = this.index + delta;
+      if (next >= this.entries.length) {
+        this.index = undefined;
+        return this.draft;
+      }
+      this.index = Math.max(0, next);
+    }
+    return this.entries[this.index]!;
+  }
+
+  detach(): void {
+    this.index = undefined;
+  }
+}
+
+async function runTerminalWorkspace(
+  options: TerminalWorkspaceOptions,
+  screen: InteractiveScreen,
+): Promise<void> {
+  const input = screen.input;
+  const output = screen.output;
+  const editor = new EditorState();
+  const history = new PromptHistory();
+  const parser = new TerminalInputParser();
   let busy = false;
   let busyKind: 'prompt' | 'command' | undefined;
   let scrollOffset = 0;
   let paletteIndex = 0;
+  let closed = false;
   let controller: AbortController | undefined;
   let approval: { action: string; detail: string; resolve: (allowed: boolean) => void } | undefined;
   let transcript: TranscriptEntry[] = [
@@ -228,64 +415,44 @@ export async function terminalWorkspace(options: TerminalWorkspaceOptions): Prom
     scrollOffset = 0;
     draw();
   };
-  const palette = () => (buffer.startsWith('/') && !busy ? filterWorkspaceCommands(buffer) : []);
+  const palette = () =>
+    editor.text.startsWith('/') && !busy ? filterWorkspaceCommands(editor.text) : [];
   const draw = () => {
-    const width = output.columns ?? 80;
-    const height = output.rows ?? 24;
+    if (closed) return;
     const matches = palette();
     paletteIndex = selectPalette(paletteIndex, 0, matches.length);
-    const metrics = layoutWorkspace(
-      width,
-      height,
-      matches.length ? Math.min(5, matches.length) + 1 : 0,
-    );
-    const header = options.header();
-    const title = ` KYOKAO  ${header.workspace} `;
-    const meta = `${header.provider}/${header.model} · ${header.approval}`;
-    const fit = (value: string, max: number) =>
-      value.length > max ? `${value.slice(0, Math.max(1, max - 1))}…` : value;
-    const inner = metrics.width - 2;
-    const fittedTitle = fit(title, Math.max(1, inner - meta.length - 1));
-    const rendered = renderTranscript(transcript, metrics.width);
-    const maxScroll = Math.max(0, rendered.length - metrics.transcriptHeight);
+    const rendered = renderTranscript(transcript, output.columns ?? 80);
+    const requestedScrollOffset = scrollOffset;
+    let frame = renderWorkspaceScreen({
+      width: output.columns ?? 80,
+      height: output.rows ?? 24,
+      header: options.header(),
+      transcript,
+      editor,
+      busy,
+      busyKind,
+      approval,
+      scrollOffset,
+      paletteIndex,
+      animationFrame: Math.floor(Date.now() / 350) % 3,
+    });
+    const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
-    const end = rendered.length - scrollOffset;
-    const visible = rendered.slice(Math.max(0, end - metrics.transcriptHeight), end);
-    const line = '─'.repeat(Math.max(0, metrics.width - 2));
-    output.write('\x1b[?25l\x1b[H\x1b[2J');
-    output.write(`${theme.muted(`╭${line}╮`)}\n`);
-    output.write(
-      `│${theme.brand(fittedTitle)}${' '.repeat(Math.max(1, inner - fittedTitle.length - meta.length))}${theme.muted(meta)}│\n`,
-    );
-    output.write(`${theme.muted(`├${line}┤`)}\n`);
-    output.write(`${visible.join('\n')}\n`);
-    output.write(`${theme.muted(`├${line}┤`)}\n`);
-    const status = approval
-      ? `${approval.action}: ${approval.detail} [y/N]`
-      : busy
-        ? busyKind === 'command'
-          ? `Running command ${['·', '••', '•••'][Math.floor(Date.now() / 350) % 3]}  input disabled`
-          : `Working ${['·', '••', '•••'][Math.floor(Date.now() / 350) % 3]}  Ctrl-C cancels`
-        : scrollOffset
-          ? `Viewing earlier output (${scrollOffset} lines) · End returns`
-          : 'Ready';
-    output.write(`│ ${fit(status, inner - 1).padEnd(Math.max(0, inner - 1))}│\n`);
-    output.write(`${theme.muted(`╰${line}╯`)}\n`);
-    if (matches.length) {
-      const paletteRows = visiblePaletteCommands(matches, paletteIndex);
-      output.write(`${theme.muted('Commands')}\n`);
-      for (const [index, item] of paletteRows.commands.entries()) {
-        const absoluteIndex = paletteRows.start + index;
-        output.write(
-          `${absoluteIndex === paletteIndex ? theme.user('›') : ' '} ${theme.user(item.syntax)} ${theme.muted(item.description)}\n`,
-        );
-      }
-    }
-    output.write(
-      `${theme.muted(busy ? (busyKind === 'command' ? 'Command running' : 'Ctrl-C cancel') : 'Enter submit')}  ${theme.muted('Alt-Enter newline')}  ${theme.muted('/ commands')}  ${theme.muted('Ctrl-C exit')}\n`,
-    );
-    const composerRows = buffer.split('\n');
-    output.write(`${theme.user('›')} ${composerRows.join(`\n  `)}`);
+    if (scrollOffset !== requestedScrollOffset)
+      frame = renderWorkspaceScreen({
+        width: output.columns ?? 80,
+        height: output.rows ?? 24,
+        header: options.header(),
+        transcript,
+        editor,
+        busy,
+        busyKind,
+        approval,
+        scrollOffset,
+        paletteIndex,
+        animationFrame: Math.floor(Date.now() / 350) % 3,
+      });
+    screen.draw(frame);
   };
   const askApproval = (action: string, detail: string) =>
     new Promise<boolean>((resolve) => {
@@ -324,123 +491,171 @@ export async function terminalWorkspace(options: TerminalWorkspaceOptions): Prom
     busy = true;
     busyKind = 'command';
     draw();
+    let close = false;
     try {
       const result = await options.onCommand(parsed, emit);
       if (result?.clear) transcript = [];
       for (const message of result?.messages ?? []) emit(message.kind ?? 'system', message.text);
-      return result?.close === true;
+      close = result?.close === true;
+      return close;
     } catch (error) {
       emit('error', error instanceof Error ? error.message : String(error));
       return false;
     } finally {
       busy = false;
       busyKind = undefined;
-      draw();
+      if (!close) draw();
     }
   };
 
-  input.setRawMode(true);
-  input.setEncoding('utf8');
-  input.resume();
   const onResize = () => draw();
   output.on('resize', onResize);
   const ticker = setInterval(() => busy && draw(), 350);
   let dataListener: ((chunk: string) => void) | undefined;
-  draw();
+  let streamFinish: (() => void) | undefined;
+  let escapeTimer: ReturnType<typeof setTimeout> | undefined;
   try {
+    draw();
     await new Promise<void>((resolve) => {
-      const onData = (chunk: string) => {
-        const characters = Array.from(chunk);
-        if (
-          characters.length > 1 &&
-          !chunk.startsWith('\u001b[') &&
-          chunk !== '\u001b\r' &&
-          chunk !== '\u001b\n'
-        ) {
-          for (const character of characters) onData(character);
-          return;
-        }
+      const finish = () => resolve();
+      streamFinish = finish;
+      const handleEvent = (event: InputEvent) => {
         if (approval) {
-          if (/^[yY]/.test(chunk)) settleApproval(true);
-          else if (chunk === '\u0003' || chunk === '\u001b' || /^[nN\r\n]/.test(chunk))
+          if (event.type === 'text' && /^[yY]/.test(event.text)) settleApproval(true);
+          else if (
+            (event.type === 'key' &&
+              ['interrupt', 'escape', 'enter', 'newline'].includes(event.key)) ||
+            (event.type === 'text' && /^[nN]/.test(event.text))
+          )
             settleApproval(false, 'Approval denied.');
           else return;
           draw();
           return;
         }
-        if (chunk === '\u0003') {
+        if (event.type === 'key' && event.key === 'interrupt') {
           if (busyKind === 'prompt') controller?.abort();
           else if (busyKind === 'command')
             emit('status', 'Command is running and cannot be cancelled.');
           else resolve();
           return;
         }
-        if (chunk === '\u001b') {
-          if (buffer.startsWith('/')) {
-            buffer = '';
+        if (event.type === 'key' && event.key === 'escape') {
+          if (editor.text.startsWith('/')) {
+            editor.set('');
             paletteIndex = 0;
             draw();
           }
           return;
         }
-        if (chunk === '\u001b[A' || chunk === '\u001b[B') {
-          const matches = palette();
-          if (matches.length) {
-            paletteIndex = selectPalette(
-              paletteIndex,
-              chunk === '\u001b[A' ? -1 : 1,
-              matches.length,
-            );
-          } else scrollOffset = Math.max(0, scrollOffset + (chunk === '\u001b[A' ? 4 : -4));
+        if (busy) return;
+        if (event.type === 'paste') {
+          history.detach();
+          editor.insert(event.text.replace(/\r\n?/g, '\n'));
+          paletteIndex = 0;
           draw();
           return;
         }
-        if (chunk === '\u001b[5~') scrollOffset += 8;
-        else if (chunk === '\u001b[6~') scrollOffset = Math.max(0, scrollOffset - 8);
-        else if (chunk === '\u001b[F' || chunk === '\u001b[4~') scrollOffset = 0;
-        else if (chunk === '\u007f') buffer = buffer.slice(0, -1);
-        else if (chunk === '\t' && palette().length) buffer = `/${palette()[paletteIndex]!.name} `;
-        else if ((chunk === '\u001b\r' || chunk === '\u001b\n') && !busy) buffer += '\n';
-        else if ((chunk === '\r' || chunk === '\n') && !busy) {
-          const prompt = buffer.trim();
+        if (event.type === 'text') {
+          history.detach();
+          editor.insert(event.text);
+          paletteIndex = 0;
+          draw();
+          return;
+        }
+        const key = event.key;
+        if (key === 'up' || key === 'down') {
+          const matches = palette();
+          if (matches.length && !history.browsing) {
+            paletteIndex = selectPalette(paletteIndex, key === 'up' ? -1 : 1, matches.length);
+          } else if (editor.multiline) editor.vertical(key === 'up' ? -1 : 1);
+          else editor.set(history.browse(key === 'up' ? -1 : 1, editor.text));
+          draw();
+          return;
+        }
+        if (key === 'page-up') scrollOffset += Math.max(1, (output.rows ?? 24) - 10);
+        else if (key === 'page-down')
+          scrollOffset = Math.max(0, scrollOffset - Math.max(1, (output.rows ?? 24) - 10));
+        else if (key === 'backspace') editor.backspace();
+        else if (key === 'delete') editor.delete();
+        else if (key === 'left') editor.left();
+        else if (key === 'right') editor.right();
+        else if (key === 'home') editor.home();
+        else if (key === 'end') {
+          if (scrollOffset) scrollOffset = 0;
+          else editor.end();
+        } else if (key === 'ctrl-a') editor.start();
+        else if (key === 'ctrl-e') editor.finish();
+        else if (key === 'ctrl-u') editor.killBefore();
+        else if (key === 'ctrl-k') editor.killAfter();
+        else if (key === 'ctrl-w') editor.deleteWordBefore();
+        else if (key === 'alt-left') editor.wordLeft();
+        else if (key === 'alt-right') editor.wordRight();
+        else if (key === 'newline') editor.insert('\n');
+        else if (key === 'tab' && palette().length) {
+          editor.set(`/${palette()[paletteIndex]!.name} `);
+          history.detach();
+        } else if (key === 'enter') {
+          const prompt = editor.text.trim();
           if (prompt) {
             if (
               prompt.startsWith('/') &&
               palette().length &&
               !parseWorkspaceCommand(prompt)?.name
             ) {
-              buffer = `/${palette()[paletteIndex]!.name} `;
+              editor.set(`/${palette()[paletteIndex]!.name} `);
               draw();
               return;
             }
-            buffer = '';
+            history.add(prompt);
+            editor.set('');
             paletteIndex = 0;
             if (prompt.startsWith('/')) {
               void runCommand(prompt).then((close) => close && resolve());
             } else void runPrompt(prompt);
           }
-        } else if (!busy && chunk >= ' ') {
-          buffer += chunk;
-          paletteIndex = 0;
         }
         draw();
       };
+      const onData = (chunk: string) => {
+        if (escapeTimer) clearTimeout(escapeTimer);
+        for (const event of parser.feed(chunk)) handleEvent(event);
+        escapeTimer = setTimeout(() => {
+          escapeTimer = undefined;
+          for (const event of parser.flushEscape()) handleEvent(event);
+        }, 25);
+      };
       dataListener = onData;
       input.on('data', dataListener);
-      input.once('close', resolve);
-      input.once('error', resolve);
+      input.once('close', finish);
+      input.once('error', finish);
+      output.once('close', finish);
+      output.once('error', finish);
     });
   } finally {
+    closed = true;
+    if (escapeTimer) clearTimeout(escapeTimer);
     clearInterval(ticker);
     controller?.abort();
     settleApproval(false);
     if (dataListener) input.removeListener('data', dataListener);
+    if (streamFinish) {
+      input.removeListener('close', streamFinish);
+      input.removeListener('error', streamFinish);
+      output.removeListener('close', streamFinish);
+      output.removeListener('error', streamFinish);
+    }
     output.removeListener('resize', onResize);
-    input.setRawMode(previousRaw ?? false);
-    if (previousEncoding) input.setEncoding(previousEncoding);
-    input.pause();
-    output.write('\x1b[?25h\n');
   }
+}
+
+export async function terminalWorkspace(options: TerminalWorkspaceOptions): Promise<void> {
+  if (options.screen) return await runTerminalWorkspace(options, options.screen);
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stdout;
+  if (!input.isTTY || !output.isTTY) throw new Error('interactive workspace requires a TTY');
+  return await withInteractiveScreen({ input, output }, async (screen) => {
+    await runTerminalWorkspace(options, screen);
+  });
 }
 
 export const ui = {

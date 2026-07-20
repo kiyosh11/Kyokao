@@ -13,6 +13,7 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "test": "vitest run",
+    "test:pty": "node scripts/pty-integration.mjs",
     "kyokao": "pnpm --filter kyokao start"
   },
   "devDependencies": {
