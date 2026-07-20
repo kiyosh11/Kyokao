@@ -187,9 +187,20 @@ async function chat() {
     await r.tools.close?.();
   }
 }
+async function tui() {
+  const r = await runtime();
+  try {
+    await fullscreenChat(async (prompt) => {
+      const session = await runPrompt(r, prompt, undefined, false);
+      return (session as typeof session & { __answer?: string }).__answer;
+    });
+  } finally {
+    await r.tools.close?.();
+  }
+}
 program.argument('[prompt...]', 'task for the agent').action(async (parts: string[]) => {
   if (parts.length) await ask(parts.join(' '));
-  else if (process.stdin.isTTY) await chat();
+  else if (process.stdin.isTTY) await tui();
   else {
     const chunks: Buffer[] = [];
     for await (const c of process.stdin) chunks.push(c);
@@ -222,20 +233,7 @@ program
       );
     });
   });
-program
-  .command('tui')
-  .description('Start the full-screen terminal chat interface')
-  .action(async () => {
-    const r = await runtime();
-    try {
-      await fullscreenChat(async (prompt) => {
-        const session = await runPrompt(r, prompt, undefined, false);
-        return (session as typeof session & { __answer?: string }).__answer;
-      });
-    } finally {
-      await r.tools.close?.();
-    }
-  });
+program.command('tui').description('Start the full-screen terminal chat interface').action(tui);
 program
   .command('models')
   .description('List models from the selected provider')

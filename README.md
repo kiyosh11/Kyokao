@@ -2,7 +2,7 @@
 
 Kyokao is a local-first TypeScript coding-agent CLI. It sends prompts and tool definitions to an OpenAI-compatible chat-completions API, then performs a bounded tool-call loop in the directory where it is run. Its tool surface is intentionally small and file paths are constrained to that workspace.
 
-It is an early, command-line-oriented implementation—not a hosted service or a full-screen terminal application. Review generated changes before keeping or committing them.
+It is a local command-line application with a full-screen terminal interface. Review generated changes before keeping or committing them.
 
 ## Contents
 
@@ -24,8 +24,8 @@ It is an early, command-line-oriented implementation—not a hosted service or a
 
 - OpenAI-compatible provider client with streaming enabled by default for normal CLI runs.
 - Built-in presets for hosted and local endpoints; custom OpenAI-compatible endpoints are supported.
-- One-shot prompts, piped prompts, and a simple persistent interactive `chat` loop.
-- Full-screen `tui` mode with syntax-highlighted Markdown code blocks.
+- One-shot prompts, piped prompts, and a persistent full-screen interactive session by default.
+- An explicit `tui` command plus a line-oriented `chat` mode, both with syntax-highlighted Markdown code blocks.
 - Permission modes for file mutations and shell commands.
 - Configurable editor launching, repository instruction files, model sampling/fallback controls, and enforceable per-run safety budgets.
 - Workspace-scoped file, search, shell, read-only Git, and HTTP GET tools.
@@ -71,7 +71,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.1.0.tgz
+npm install -g ./kyokao-0.1.1.tgz
 kyokao --help
 ```
 
@@ -85,7 +85,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.1.0.tgz
+npm install -g .\kyokao-0.1.1.tgz
 npm uninstall -g kyokao
 ```
 
@@ -104,13 +104,13 @@ A prompt is a one-shot run. Piped standard input is also used as a one-shot prom
 printf '%s\n' 'run the relevant tests and report failures' | kyokao
 ```
 
-For a persistent interactive session, use `chat` (or run bare `kyokao`) in a TTY. Type `/exit` or submit an empty line to leave.
+For a persistent interactive session, run bare `kyokao` or `kyokao tui` in a TTY. The full-screen interface supports `/help`, `/clear`, and `/exit`; use `kyokao chat` for the line-oriented mode.
 
 ```bash
-kyokao chat
-# kyokao (type /exit)> inspect the tests
-# kyokao> explain the failures
-# kyokao> /exit
+kyokao
+# full-screen Kyokao interface
+# type a task, then press Enter
+# /help, /clear, or /exit
 ```
 
 From source, replace `kyokao` in the examples with `pnpm --filter kyokao start`:
@@ -435,8 +435,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -446,7 +446,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.1.0.tgz
+TARBALL=kyokao-0.1.1.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -458,7 +458,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.1.0.tgz'
+$tarball = '.\kyokao-0.1.1.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help
