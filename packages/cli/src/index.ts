@@ -2,7 +2,6 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline/promises';
 import {
   loadConfig,
   readConfig,
@@ -11,6 +10,8 @@ import {
   providerPresets,
   atomicWrite,
   globalConfigPath,
+  mergeProviderSetup,
+  effectiveSetupApiKey,
   type KyokaoConfig,
 } from '@kyokao/config';
 import { OpenAICompatibleProvider, modelCatalog as builtInModelCatalog } from '@kyokao/providers';
@@ -23,12 +24,18 @@ import {
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
 import { Agent, loadInstructionFiles } from '@kyokao/agent';
-import { terminalWorkspace, ui, workspaceCommands, type WorkspaceEmit } from '@kyokao/ui';
+import {
+  setupWizard,
+  terminalWorkspace,
+  ui,
+  workspaceCommands,
+  type WorkspaceEmit,
+} from '@kyokao/ui';
 const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: a safe, local-first coding agent')
-  .version('0.2.0')
+  .version('0.3.0')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -88,91 +95,6 @@ function cliConfig(): Partial<KyokaoConfig> {
         : {},
   } as Partial<KyokaoConfig>;
 }
-async function promptSecret(prompt: string): Promise<string> {
-  if (!process.stdin.isTTY) throw new Error('API key setup requires an interactive terminal');
-  process.stdout.write(prompt);
-  const previousRaw = process.stdin.isRaw;
-  const previousEncoding = process.stdin.readableEncoding;
-  return await new Promise<string>((resolve, reject) => {
-    let value = '';
-    const cleanup = () => {
-      process.stdin.removeListener('data', onData);
-      process.stdin.setRawMode(previousRaw ?? false);
-      if (previousEncoding) process.stdin.setEncoding(previousEncoding);
-      process.stdout.write('\n');
-    };
-    const onData = (chunk: string) => {
-      for (const char of chunk) {
-        if (char === '\u0003') {
-          cleanup();
-          reject(new Error('API key setup cancelled'));
-          return;
-        }
-        if (char === '\r' || char === '\n') {
-          cleanup();
-          resolve(value);
-          return;
-        }
-        if (char === '\u007f') value = value.slice(0, -1);
-        else if (char >= ' ') value += char;
-      }
-    };
-    process.stdin.setRawMode(true);
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', onData);
-  });
-}
-async function setupProvider(current: KyokaoConfig): Promise<void> {
-  const configuredProviders = Object.keys(current.providers);
-  const names = [...new Set([...Object.keys(providerPresets), ...configuredProviders])];
-  const line = createInterface({ input: process.stdin, output: process.stdout });
-  console.clear();
-  console.log('\n  KYOKAO SETUP\n');
-  console.log('  Choose a provider for your default workspace:\n');
-  names.forEach((name, index) => {
-    const preset = providerPresets[name];
-    const mode = preset && ['ollama', 'lmstudio', 'vllm'].includes(name) ? 'local' : 'API key';
-    console.log(`  ${String(index + 1).padStart(2, ' ')}. ${name.padEnd(12)} ${mode}`);
-  });
-  const choice = await line.question(
-    `\n  Provider [1-${names.length}] (default ${current.provider}): `,
-  );
-  const parsed = Number(choice);
-  const provider =
-    names[Number.isInteger(parsed) && parsed >= 1 && parsed <= names.length ? parsed - 1 : 0] ??
-    current.provider;
-  const model = (
-    await line.question(
-      `  Model ID (default ${current.model}; run "kyokao models" later to inspect): `,
-    )
-  ).trim();
-  line.close();
-  const preset = providerPresets[provider];
-  const existingKey = current.providers[provider]?.apiKey;
-  const environmentKey = preset?.env ? process.env[preset.env] : undefined;
-  const local = ['ollama', 'lmstudio', 'vllm'].includes(provider);
-  let apiKey = existingKey;
-  if (!local && !existingKey && !environmentKey)
-    apiKey = await promptSecret(`  ${preset?.env ?? 'API'} key (hidden): `);
-  console.log(
-    local
-      ? `\n  ${provider} uses a local server; no API key will be saved.`
-      : environmentKey
-        ? `\n  Using the existing ${preset?.env} environment variable; the key will not be saved.`
-        : '\n  Browser login is only offered for providers with an explicit supported OAuth flow; these presets use API keys.',
-  );
-  const saved = await readConfig(globalConfigPath());
-  const providers = { ...saved.providers, [provider]: { ...saved.providers?.[provider] } };
-  if (apiKey) providers[provider] = { ...providers[provider], apiKey };
-  else delete providers[provider]?.apiKey;
-  await atomicWrite(globalConfigPath(), {
-    ...saved,
-    provider,
-    model: model || current.model,
-    providers,
-  });
-  console.log(`  Saved provider setup to ${globalConfigPath()}\n`);
-}
 async function needsProviderSetup(): Promise<boolean> {
   const options = program.opts();
   if (options.provider || options.baseUrl || options.apiKey || options.model || options.profile)
@@ -183,6 +105,68 @@ async function needsProviderSetup(): Promise<boolean> {
   ]);
   return !global.provider && !local.provider && !process.env.KYOKAO_PROVIDER;
 }
+
+async function setupProvider(confirmReplace = false): Promise<boolean> {
+  const saved = await readConfig(globalConfigPath());
+  const localNames = new Set(['ollama', 'lmstudio', 'vllm']);
+  const providers = [
+    ...Object.entries(providerPresets).map(([name, preset]) => ({
+      name,
+      baseURL: preset.baseURL,
+      env: preset.env,
+      local: localNames.has(name),
+      description: localNames.has(name)
+        ? `Local server at ${preset.baseURL}`
+        : `Hosted API (${preset.env})`,
+    })),
+    ...Object.entries(saved.providers ?? {})
+      .filter(([name]) => !providerPresets[name])
+      .map(([name, provider]) => ({
+        name,
+        baseURL: provider.baseURL,
+        description: provider.baseURL
+          ? `Saved endpoint at ${provider.baseURL}`
+          : 'Saved custom provider',
+      })),
+    { name: '__custom__', description: 'New OpenAI-compatible endpoint' },
+  ];
+  const result = await setupWizard({
+    providers,
+    configPath: globalConfigPath(),
+    confirmReplace,
+    keySource: (provider) =>
+      provider.local
+        ? 'local'
+        : saved.providers?.[provider.name]?.apiKey
+          ? 'saved'
+          : provider.env && process.env[provider.env]
+            ? 'environment'
+            : 'not configured',
+    fetchModels: async ({ provider, baseURL, apiKey, local, signal }) => {
+      const effectiveKey = effectiveSetupApiKey(
+        apiKey,
+        saved.providers?.[provider]?.apiKey,
+        providerPresets[provider]?.env ? process.env[providerPresets[provider]!.env] : undefined,
+      );
+      if (!baseURL || (!local && !effectiveKey)) return [];
+      return await new OpenAICompatibleProvider({
+        baseURL,
+        apiKey: effectiveKey,
+        model: 'setup',
+      }).models(signal);
+    },
+  });
+  if (!result) return false;
+  await atomicWrite(
+    globalConfigPath(),
+    mergeProviderSetup(saved, {
+      ...result,
+      presetBaseURL: providerPresets[result.provider]?.baseURL,
+    }),
+  );
+  return true;
+}
+
 async function runtime(
   overrides: Partial<KyokaoConfig> = {},
   approve: (action: string, detail: string) => Promise<boolean> = ui.approve,
@@ -290,7 +274,9 @@ async function ask(prompt: string, sessionId?: string) {
   }
 }
 async function tui() {
-  if (await needsProviderSetup()) await setupProvider(await loadConfig());
+  if (await needsProviderSetup()) {
+    if (!(await setupProvider())) return;
+  }
   let requestApproval: (action: string, detail: string) => Promise<boolean> = ui.approve;
   const approve = (action: string, detail: string) => requestApproval(action, detail);
   let r = await runtime({}, approve);
@@ -536,6 +522,13 @@ config
     console.log(JSON.stringify(redact(await loadConfig({ cli: cliConfig() })), null, 2)),
   );
 config.command('path').action(() => console.log(globalConfigPath()));
+config
+  .command('setup')
+  .description('Run the interactive provider setup')
+  .action(async () => {
+    if (!(await setupProvider(Boolean((await readConfig(globalConfigPath())).provider))))
+      process.exitCode = 1;
+  });
 config
   .command('export <file>')
   .description('Export redacted resolved configuration')

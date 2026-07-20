@@ -71,7 +71,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.2.0.tgz
+npm install -g ./kyokao-0.3.0.tgz
 kyokao --help
 ```
 
@@ -85,7 +85,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.2.0.tgz
+npm install -g .\kyokao-0.3.0.tgz
 npm uninstall -g kyokao
 ```
 
@@ -104,12 +104,25 @@ A prompt is a one-shot run. Piped standard input is also used as a one-shot prom
 printf '%s\n' 'run the relevant tests and report failures' | kyokao
 ```
 
-For a persistent interactive session, run bare `kyokao`, `kyokao chat`, or `kyokao tui` in a TTY. On the first run, Kyokao opens a provider setup wizard, lets you choose a hosted or local preset, accepts an API key without echoing it, and saves the selected provider and model in the user config. Existing provider environment variables are used without being copied into that file; browser login is only available for providers with an explicit supported OAuth/device flow.
+For a persistent interactive session, run bare `kyokao`, `kyokao chat`, or `kyokao tui` in a TTY. If no provider is configured, Kyokao first opens its full-screen setup flow. It uses a selectable provider list (Up/Down or `j`/`k`, then Enter), supports local presets and custom OpenAI-compatible endpoints, and moves directly into the workspace after saving. Escape goes back; Ctrl-C cancels and restores the terminal.
+
+```text
+ _  ___   _____  _  __   _    ___
+| |/ / | |/ _ \| |/ /  /_\  / _ \
+| ' <| |_| | (_) | ' <  / _ \| (_) |
+|_|\_\___/ \___/|_|\_\/_/ \_\___/
+
+Choose a provider
+› ollama — Local server at http://localhost:11434/v1
+  openai — Hosted API (OPENAI_API_KEY)
+```
+
+Hosted API-key input is masked. A present preset environment variable is reported as `environment` and is never copied into the config; local Ollama, LM Studio, and vLLM presets do not require a key. The review screen shows only a key source (`environment`, `saved`, or `not configured`), not key contents. Setup writes the selected provider, model, and approval mode to `~/.config/kyokao/config.json` on Linux (or the platform config location), preserving unrelated global settings. A manually entered key is stored locally with mode `0600`; prefer an environment variable when feasible. Re-run the flow with `kyokao config setup`.
 
 ```bash
 kyokao
-# terminal workspace: header, scrollable transcript, composer, and command palette
-# Enter submits; Alt-Enter inserts a newline where the terminal supports it; Ctrl-C cancels an active request or exits when idle
+# setup: Up/Down or j/k select, Enter continues, Escape goes back, Ctrl-C cancels
+# workspace: Enter submits; Alt-Enter inserts a newline where the terminal supports it
 # type / to filter commands, then use Up/Down and Enter
 ```
 
@@ -168,6 +181,7 @@ The default invocation accepts `[prompt...]`: with words it runs them as one pro
 | `mcp`                      | Lists configured MCP stdio servers.                                                                        | `kyokao mcp`                                                    |
 | `edit <path>`              | Opens a workspace file in the configured editor.                                                           | `kyokao edit src/index.ts`                                      |
 | `providers`                | Prints built-in preset names and base URLs.                                                                | `kyokao providers`                                              |
+| `config setup`             | Re-runs the interactive provider, model, and approval setup flow.                                          | `kyokao config setup`                                           |
 | `config show`              | Prints the resolved non-profile config with key/token/secret/password fields redacted.                     | `kyokao config show`                                            |
 | `config path`              | Prints the global config path.                                                                             | `kyokao config path`                                            |
 | `config export <file>`     | Atomically writes a redacted resolved non-profile config.                                                  | `kyokao config export /tmp/kyokao-config.json`                  |
@@ -448,8 +462,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -459,7 +473,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.2.0.tgz
+TARBALL=kyokao-0.3.0.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -471,7 +485,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.2.0.tgz'
+$tarball = '.\kyokao-0.3.0.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help

@@ -7,6 +7,11 @@ import {
   terminalWorkspace,
   visiblePaletteCommands,
   type WorkspaceEmit,
+  renderSetupScreen,
+  setupSelect,
+  setupWizard,
+  validateBaseURL,
+  visibleSetupItems,
 } from '@kyokao/ui';
 
 class FakeInput extends EventEmitter {
@@ -22,6 +27,9 @@ class FakeInput extends EventEmitter {
     return this;
   }
   pause() {
+    return this;
+  }
+  resume() {
     return this;
   }
   send(value: string) {
@@ -204,5 +212,131 @@ describe('terminal workspace helpers', () => {
     await done;
     await tick();
     expect(decisions).toEqual([false, false]);
+  });
+});
+
+describe('first-run setup helpers', () => {
+  it('renders a narrow, masked setup screen and validates custom endpoints', () => {
+    const screen = plain(
+      renderSetupScreen({
+        width: 28,
+        step: 'key',
+        title: 'API key',
+        value: 'super-secret-key',
+        secret: true,
+      }),
+    );
+    expect(screen).toContain('KYOKAO');
+    expect(screen).toContain('••••');
+    expect(screen).not.toContain('super-secret-key');
+    expect(validateBaseURL('not a url')).toContain('valid');
+    expect(validateBaseURL('https://gateway.test/v1')).toBeUndefined();
+    expect(setupSelect(0, -1, 2)).toBe(0);
+  });
+
+  it('navigates first-run setup with keys, preserves environment keys, and restores terminal', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = setupWizard({
+      input: input as never,
+      output: output as never,
+      configPath: '/tmp/kyokao.json',
+      providers: [
+        { name: 'hosted', description: 'Hosted API', env: 'HOSTED_KEY' },
+        {
+          name: 'ollama',
+          description: 'Local server',
+          local: true,
+          baseURL: 'http://localhost:11434/v1',
+        },
+      ],
+      keySource: (provider) => (provider.name === 'hosted' ? 'environment' : 'not configured'),
+    });
+    input.send('\u001b[B');
+    input.send('\n');
+    await tick();
+    input.send('llama3.2');
+    input.send('\n');
+    await tick();
+    input.send('\n');
+    await tick();
+    input.send('\n');
+    const result = await done;
+    expect(result).toMatchObject({ provider: 'ollama', model: 'llama3.2', approval: 'suggest' });
+    expect(plain(output.text)).toContain('Key: not configured');
+    expect(input.isRaw).toBe(false);
+    expect(output.text).toContain('\x1b[?25h');
+  });
+
+  it('supports custom provider navigation, back, and cancellation', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = setupWizard({
+      input: input as never,
+      output: output as never,
+      configPath: '/tmp/kyokao.json',
+      providers: [{ name: '__custom__', description: 'Custom endpoint' }],
+    });
+    input.send('\n');
+    input.send('acme\n');
+    input.send('\u001b');
+    input.send('acme\n');
+    input.send('https://api.acme.test/v1\n');
+    input.send('\u0003');
+    await expect(done).resolves.toBeUndefined();
+    expect(input.isRaw).toBe(false);
+  });
+});
+
+describe('setup wizard resilience', () => {
+  it('keeps selected providers visible in a height-aware window', () => {
+    const items = Array.from({ length: 15 }, (_, i) => ({
+      name: `provider-${i}`,
+      description: '',
+    }));
+    expect(visibleSetupItems(items, 8, 24, 10).items).toContain(items[12]);
+    const screen = plain(
+      renderSetupScreen({
+        width: 70,
+        height: 24,
+        step: 'provider',
+        title: 'Choose',
+        items,
+        selected: 8,
+      }),
+    );
+    expect(screen).toContain('› provider-8');
+    expect(screen).toContain('↑ more');
+    expect(screen).toContain('↓ more');
+  });
+  it('requires confirmation for explicit replacement and cleans up on close', async () => {
+    const output = new FakeOutput();
+    const input = new FakeInput();
+    const cancelled = setupWizard({
+      input: input as never,
+      output: output as never,
+      configPath: '/tmp/config.json',
+      confirmReplace: true,
+      providers: [{ name: 'ollama', description: 'Local', local: true }],
+    });
+    input.send('\n');
+    await expect(cancelled).resolves.toBeUndefined();
+    const closingInput = new FakeInput();
+    const closing = setupWizard({
+      input: closingInput as never,
+      output: output as never,
+      configPath: '/tmp/config.json',
+      providers: [{ name: 'hosted', description: 'Hosted' }],
+      fetchModels: async () => await new Promise<string[]>(() => {}),
+    });
+    closingInput.send('\n');
+    await tick();
+    closingInput.send('\n');
+    await tick();
+    closingInput.send('j');
+    expect(plain(output.text)).toContain('Checking models');
+    closingInput.emit('close');
+    await expect(closing).resolves.toBeUndefined();
+    expect(closingInput.isRaw).toBe(false);
   });
 });
