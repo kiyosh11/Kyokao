@@ -350,3 +350,39 @@ export async function atomicWrite(path: string, data: unknown): Promise<void> {
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
   await rename(tmp, path);
 }
+
+export interface ProviderSetupInput {
+  provider: string;
+  model: string;
+  approval: ApprovalMode;
+  baseURL?: string;
+  presetBaseURL?: string;
+  apiKey?: string;
+}
+export function mergeProviderSetup(
+  saved: Partial<KyokaoConfig>,
+  setup: ProviderSetupInput,
+): Partial<KyokaoConfig> {
+  const current = { ...(saved.providers?.[setup.provider] ?? {}) };
+  if (setup.presetBaseURL && setup.baseURL === setup.presetBaseURL) delete current.baseURL;
+  else if (setup.baseURL) current.baseURL = setup.baseURL;
+  if (setup.apiKey) current.apiKey = setup.apiKey;
+  const providers = { ...(saved.providers ?? {}) };
+  if (Object.keys(current).length) providers[setup.provider] = current;
+  else delete providers[setup.provider];
+  return {
+    ...saved,
+    provider: setup.provider,
+    model: setup.model,
+    approval: setup.approval,
+    providers,
+  };
+}
+
+export function effectiveSetupApiKey(
+  entered?: string,
+  saved?: string,
+  environment?: string,
+): string | undefined {
+  return entered || saved || environment;
+}

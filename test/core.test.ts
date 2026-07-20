@@ -3,7 +3,14 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, redact } from '@kyokao/config';
+import {
+  atomicWrite,
+  effectiveSetupApiKey,
+  loadConfig,
+  mergeProviderSetup,
+  readConfig,
+  redact,
+} from '@kyokao/config';
 import {
   WorkspaceSandbox,
   CoreTools,
@@ -340,5 +347,78 @@ describe('platform extensions', () => {
       message: { content: 'ok' },
     });
     expect(bodies.map((body) => body.model)).toEqual(['primary', 'backup']);
+  });
+});
+
+describe('setup config persistence', () => {
+  it('atomically keeps unrelated global settings while changing provider inputs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-config-'));
+    const path = join(dir, 'config.json');
+    const existing = {
+      aliases: { fast: 'gpt-fast' },
+      plugins: ['plugin.mjs'],
+      mcp: { local: { command: 'node' } },
+      providers: { old: { apiKey: 'keep-me' } },
+    };
+    await atomicWrite(path, existing);
+    const saved = await readConfig(path);
+    await atomicWrite(
+      path,
+      mergeProviderSetup(saved, {
+        provider: 'ollama',
+        model: 'llama3.2',
+        approval: 'suggest',
+        baseURL: 'http://localhost:11434/v1',
+        presetBaseURL: 'http://localhost:11434/v1',
+      }),
+    );
+    const restored = await readConfig(path);
+    expect(restored.aliases).toEqual(existing.aliases);
+    expect(restored.plugins).toEqual(existing.plugins);
+    expect(restored.mcp).toEqual(existing.mcp);
+    expect(restored.providers?.old?.apiKey).toBe('keep-me');
+  });
+});
+
+it('merges setup persistence without losing unrelated config or blanking saved credentials', () => {
+  const saved = {
+    provider: 'old',
+    aliases: { fast: 'model' },
+    providers: { openai: { apiKey: 'saved', baseURL: 'https://old.example/v1' } },
+  };
+  const merged = mergeProviderSetup(saved, {
+    provider: 'openai',
+    model: 'gpt-next',
+    approval: 'suggest',
+    baseURL: 'https://api.openai.com/v1',
+    presetBaseURL: 'https://api.openai.com/v1',
+  });
+  expect(merged.aliases).toEqual(saved.aliases);
+  expect(merged.providers?.openai?.apiKey).toBe('saved');
+  expect(merged.providers?.openai?.baseURL).toBeUndefined();
+});
+
+describe('provider setup credentials and cancellation', () => {
+  it('uses entered, saved, then environment setup credentials without rendering them', () => {
+    expect(effectiveSetupApiKey('entered', 'saved', 'environment')).toBe('entered');
+    expect(effectiveSetupApiKey(undefined, 'saved', 'environment')).toBe('saved');
+    expect(effectiveSetupApiKey(undefined, undefined, 'environment')).toBe('environment');
+  });
+
+  it('aborts a model listing request', async () => {
+    const controller = new AbortController();
+    const provider = new OpenAICompatibleProvider({
+      baseURL: 'http://provider.test/v1',
+      model: 'model',
+      fetch: async (_url, init) =>
+        await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+          );
+        }),
+    });
+    const request = provider.models(controller.signal);
+    controller.abort();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

@@ -113,10 +113,12 @@ export class OpenAICompatibleProvider {
   private get request() {
     return this.options.fetch ?? fetch;
   }
-  async models(): Promise<string[]> {
-    if (this.client) return (await this.client.models.list()).data.map((model) => model.id);
+  async models(signal?: AbortSignal): Promise<string[]> {
+    if (this.client)
+      return (await this.client.models.list({ signal })).data.map((model) => model.id);
     const response = await this.request(`${this.options.baseURL!.replace(/\/$/, '')}/models`, {
       headers: this.headers(),
+      signal,
     });
     if (!response.ok) throw new Error(`Model listing failed: ${response.status}`);
     return (

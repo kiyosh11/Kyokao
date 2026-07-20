@@ -1,15 +1,8 @@
 import pc from 'picocolors';
 import { createInterface } from 'node:readline/promises';
 import type { ReadStream, WriteStream } from 'node:tty';
-
-export const theme = {
-  brand: (value: string) => pc.bold(pc.cyan(value)),
-  muted: (value: string) => pc.dim(value),
-  user: (value: string) => pc.cyan(value),
-  assistant: (value: string) => pc.green(value),
-  tool: (value: string) => pc.yellow(value),
-  error: (value: string) => pc.red(value),
-};
+import { theme } from './theme.js';
+export { theme } from './theme.js';
 
 const keywords =
   /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|from|export|async|await|new|true|false|null|undefined)\b/g;
@@ -348,6 +341,7 @@ export async function terminalWorkspace(options: TerminalWorkspaceOptions): Prom
 
   input.setRawMode(true);
   input.setEncoding('utf8');
+  input.resume();
   const onResize = () => draw();
   output.on('resize', onResize);
   const ticker = setInterval(() => busy && draw(), 350);
@@ -469,3 +463,5 @@ export const ui = {
     return /^y(es)?$/i.test(a);
   },
 };
+
+export * from './setup.js';
