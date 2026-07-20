@@ -71,7 +71,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.1.3.tgz
+npm install -g ./kyokao-0.2.0.tgz
 kyokao --help
 ```
 
@@ -85,7 +85,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.1.3.tgz
+npm install -g .\kyokao-0.2.0.tgz
 npm uninstall -g kyokao
 ```
 
@@ -448,8 +448,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -459,7 +459,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.1.3.tgz
+TARBALL=kyokao-0.2.0.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -471,7 +471,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.1.3.tgz'
+$tarball = '.\kyokao-0.2.0.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help

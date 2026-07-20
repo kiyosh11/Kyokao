@@ -1,0 +1,62 @@
+name: Publish npm package
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+concurrency:
+  group: npm-publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - name: Validate release tag
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}" || {
+            echo "Tag ${GITHUB_REF_NAME} does not match CLI version v${VERSION}" >&2
+            exit 1
+          }
+      - run: pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build
+      - name: Pack and verify CLI tarball
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          pnpm --filter kyokao pack --pack-destination artifacts
+          TARBALL="$(find artifacts -maxdepth 1 -name 'kyokao-*.tgz' -print -quit)"
+          test -n "${TARBALL}"
+          TARBALL="$(realpath "${TARBALL}")"
+          tar -tzf "${TARBALL}" | sort
+          PREFIX="$(mktemp -d)"
+          npm install --prefix "${PREFIX}" "${TARBALL}"
+          "${PREFIX}/node_modules/.bin/kyokao" --help
+          rm -rf "${PREFIX}"
+      - name: Refuse existing npm version
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if npm view "kyokao@${VERSION}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "kyokao@${VERSION} already exists on npm" >&2
+            exit 1
+          fi
+      - name: Publish to npm
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

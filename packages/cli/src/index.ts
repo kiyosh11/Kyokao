@@ -28,7 +28,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: a safe, local-first coding agent')
-  .version('0.1.0')
+  .version('0.2.0')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')

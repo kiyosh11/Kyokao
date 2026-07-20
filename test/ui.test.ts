@@ -41,6 +41,7 @@ class FakeOutput extends EventEmitter {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const plain = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
 describe('terminal workspace helpers', () => {
   it('parses commands, filters the palette, and clamps selection', () => {
@@ -162,7 +163,7 @@ describe('terminal workspace helpers', () => {
     });
     input.send('/');
     for (let i = 0; i < 8; i++) input.send('\u001b[B');
-    expect(output.text).toContain(`› /${filterWorkspaceCommands('/')[8]!.name}`);
+    expect(plain(output.text)).toContain(`› /${filterWorkspaceCommands('/')[8]!.name}`);
     input.send('\u001b');
     input.send('/doctor\n');
     await tick();
