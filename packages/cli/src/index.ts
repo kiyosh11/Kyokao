@@ -23,7 +23,7 @@ import {
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
 import { Agent, loadInstructionFiles } from '@kyokao/agent';
-import { fullscreenChat, ui } from '@kyokao/ui';
+import { terminalWorkspace, ui, workspaceCommands, type WorkspaceEmit } from '@kyokao/ui';
 const program = new Command();
 program
   .name('kyokao')
@@ -183,12 +183,21 @@ async function needsProviderSetup(): Promise<boolean> {
   ]);
   return !global.provider && !local.provider && !process.env.KYOKAO_PROVIDER;
 }
-async function runtime() {
-  const config = await loadConfig({ cli: cliConfig(), profile: program.opts().profile });
+async function runtime(
+  overrides: Partial<KyokaoConfig> = {},
+  approve: (action: string, detail: string) => Promise<boolean> = ui.approve,
+) {
+  const loaded = await loadConfig({ cli: cliConfig(), profile: program.opts().profile });
+  const config: KyokaoConfig = {
+    ...loaded,
+    ...overrides,
+    limits: { ...loaded.limits, ...(overrides.limits ?? {}) },
+    providers: { ...loaded.providers, ...(overrides.providers ?? {}) },
+  };
   const p = resolveProvider(config);
   const root = process.cwd();
   const store = new LocalStore(join(root, '.kyokao'));
-  const core = new CoreTools(new WorkspaceSandbox(root), config.approval, ui.approve, {
+  const core = new CoreTools(new WorkspaceSandbox(root), config.approval, approve, {
     maxShellTimeoutMs: config.limits.maxShellTimeoutMs,
     maxOutputChars: config.limits.maxOutputChars,
     maxFileBytes: config.limits.maxFileBytes,
@@ -212,6 +221,8 @@ async function runPrompt(
   prompt: string,
   existing?: Awaited<ReturnType<LocalStore['loadSession']>>,
   render = true,
+  events?: WorkspaceEmit,
+  signal?: AbortSignal,
 ) {
   const controller = new AbortController();
   const onInterrupt = () => controller.abort();
@@ -232,26 +243,37 @@ async function runPrompt(
       maxCostUsd: r.config.limits.maxCostUsd,
       maxOutputChars: r.config.limits.maxOutputChars,
       modelInfo,
-      onEvent: (k, t) =>
-        k === 'text'
-          ? render
-            ? process.stdout.write(t)
-            : (streamed += t)
-          : k === 'assistant'
-            ? render
-              ? ui.assistant(t)
-              : (streamed = t)
-            : k === 'usage'
-              ? render && ui.info(t)
-              : render && ui.tool(t),
-      signal: controller.signal,
+      onEvent: (k, t) => {
+        if (k === 'text') {
+          streamed += t;
+          events?.('assistant', t);
+          if (render) process.stdout.write(t);
+        } else if (k === 'assistant') {
+          if (!streamed) {
+            streamed = t;
+            events?.('assistant', t);
+          }
+          if (render) ui.assistant(t);
+        } else if (k === 'tool' || k === 'tool-result') {
+          events?.('tool', t);
+          if (render) ui.tool(t);
+        } else {
+          events?.('status', t);
+          if (render) ui.info(t);
+        }
+      },
+      signal: signal ?? controller.signal,
     });
     const session = await agent.run(prompt, existing);
-    ui.info(`Session ${session.id} (${session.checkpoint})`);
+    const status = `Session ${session.id} (${session.checkpoint})`;
+    if (render) ui.info(status);
+    else events?.('status', status);
     return render ? session : Object.assign(session, { __answer: streamed });
   } catch (error) {
-    if (controller.signal.aborted) {
-      ui.error('Interrupted; session state was saved at the last completed tool checkpoint.');
+    if (controller.signal.aborted || signal?.aborted) {
+      const status = 'Interrupted; session state was saved at the last completed tool checkpoint.';
+      if (render) ui.error(status);
+      else events?.('status', status);
       return existing;
     }
     throw error;
@@ -267,37 +289,140 @@ async function ask(prompt: string, sessionId?: string) {
     await r.tools.close?.();
   }
 }
-async function chat() {
-  if (!process.stdin.isTTY) throw new Error('chat requires an interactive terminal');
-  const r = await runtime();
-  const line = createInterface({ input: process.stdin, output: process.stdout });
-  let session: Awaited<ReturnType<LocalStore['create']>> | undefined;
-  try {
-    for (;;) {
-      const prompt = (await line.question(session ? 'kyokao> ' : 'kyokao (type /exit)> ')).trim();
-      if (!prompt || prompt === '/exit') break;
-      session = await runPrompt(r, prompt, session);
-    }
-  } finally {
-    line.close();
-    await r.tools.close?.();
-  }
-}
 async function tui() {
   if (await needsProviderSetup()) await setupProvider(await loadConfig());
-  const r = await runtime();
+  let requestApproval: (action: string, detail: string) => Promise<boolean> = ui.approve;
+  const approve = (action: string, detail: string) => requestApproval(action, detail);
+  let r = await runtime({}, approve);
   let session: Awaited<ReturnType<LocalStore['create']>> | undefined;
-  try {
-    await fullscreenChat(
-      async (prompt) => {
-        const current = await runPrompt(r, prompt, session, false);
-        session = current;
-        return (current as typeof current & { __answer?: string }).__answer;
-      },
-      process.stdin,
-      process.stdout,
-      { workspace: r.root, model: r.config.model },
+  const replaceRuntime = async (overrides: Partial<KyokaoConfig>) => {
+    const previous = r;
+    r = await runtime(
+      { ...r.config, ...overrides, limits: { ...r.config.limits, ...overrides.limits } },
+      approve,
     );
+    await previous.tools.close?.();
+  };
+  try {
+    await terminalWorkspace({
+      header: () => ({
+        workspace: r.root.replace(process.env.HOME ?? process.env.USERPROFILE ?? '', '~'),
+        provider: r.config.provider,
+        model: r.config.model,
+        approval: r.config.approval,
+      }),
+      onPrompt: async (prompt, emit, signal, approve) => {
+        if (signal.aborted) return;
+        requestApproval = approve;
+        const current = await runPrompt(r, prompt, session, false, emit, signal);
+        session = current;
+      },
+      onCommand: async (command, emit) => {
+        const arg = command.args.join(' ');
+        if (!command.name) return { messages: [{ kind: 'error', text: 'Unknown command.' }] };
+        if (command.name === 'exit') return { close: true };
+        if (command.name === 'clear') return { clear: true };
+        if (command.name === 'help') {
+          const selected = command.args[0]?.replace(/^\//, '');
+          const entries = selected
+            ? workspaceCommands.filter((entry) => entry.name === selected)
+            : workspaceCommands;
+          return {
+            messages: [
+              {
+                text: entries.length
+                  ? entries.map((entry) => `${entry.syntax} — ${entry.description}`).join('\n')
+                  : `Unknown command "${selected}".`,
+              },
+            ],
+          };
+        }
+        if (command.name === 'new') {
+          session = undefined;
+          return { messages: [{ text: 'Started a new session.' }] };
+        }
+        if (command.name === 'sessions') {
+          const sessions = await r.store.listSessions();
+          return {
+            messages: [
+              {
+                text: sessions.length
+                  ? sessions.map((s) => `${s.id}  ${s.updatedAt}  ${s.task ?? ''}`).join('\n')
+                  : 'No saved sessions.',
+              },
+            ],
+          };
+        }
+        if (command.name === 'resume') {
+          if (command.args.length !== 1)
+            return { messages: [{ kind: 'error', text: 'Usage: /resume <session-id>' }] };
+          session = await r.store.loadSession(command.args[0]!);
+          return { messages: [{ text: `Resumed session ${session.id}.` }] };
+        }
+        if (command.name === 'model') {
+          if (!arg) return { messages: [{ text: `Active model: ${r.config.model}` }] };
+          await replaceRuntime({ model: arg });
+          return { messages: [{ text: `Active model changed to ${r.config.model}.` }] };
+        }
+        if (command.name === 'provider') {
+          if (!arg) return { messages: [{ text: `Active provider: ${r.config.provider}` }] };
+          try {
+            await replaceRuntime({ provider: arg });
+          } catch (error) {
+            return {
+              messages: [
+                { kind: 'error', text: error instanceof Error ? error.message : String(error) },
+              ],
+            };
+          }
+          return { messages: [{ text: `Active provider changed to ${r.config.provider}.` }] };
+        }
+        if (command.name === 'approval') {
+          if (!arg) return { messages: [{ text: `Approval mode: ${r.config.approval}` }] };
+          if (!['suggest', 'auto-edit', 'full-auto'].includes(arg))
+            return {
+              messages: [{ kind: 'error', text: 'Usage: /approval <suggest|auto-edit|full-auto>' }],
+            };
+          await replaceRuntime({ approval: arg as KyokaoConfig['approval'] });
+          return { messages: [{ text: `Approval mode changed to ${r.config.approval}.` }] };
+        }
+        if (command.name === 'memory') {
+          const [operation, key, ...value] = command.args;
+          if (!operation || operation === 'list')
+            return { messages: [{ text: JSON.stringify(await r.store.getMemory(), null, 2) }] };
+          if (operation === 'set' && key && value.length) {
+            await r.store.setMemory(key, value.join(' '));
+            return { messages: [{ text: `Saved memory "${key}".` }] };
+          }
+          if (operation === 'delete' && key) {
+            await r.store.deleteMemory(key);
+            return { messages: [{ text: `Deleted memory "${key}".` }] };
+          }
+          return {
+            messages: [
+              { kind: 'error', text: 'Usage: /memory [list|set <key> <value>|delete <key>]' },
+            ],
+          };
+        }
+        if (command.name === 'doctor') {
+          const model = program.opts().skipModelCheck
+            ? undefined
+            : await r.provider.validateModel();
+          return {
+            messages: [
+              {
+                text: `node: ${process.version}\nworkspace: ${r.root}\nprovider: ${r.config.provider} (${r.provider.options.baseURL})\ncredentials: ${r.provider.options.apiKey ? 'configured' : 'missing'}\nmodel: ${model?.id ?? 'not checked'}\nsandbox: enabled`,
+              },
+            ],
+          };
+        }
+        if (command.name === 'diff') {
+          const result = await r.tools.execute('git', { args: ['diff', '--no-ext-diff'] });
+          emit(result.isError ? 'error' : 'tool', result.content || 'Working tree is clean.');
+          return;
+        }
+      },
+    });
   } finally {
     await r.tools.close?.();
   }
@@ -311,7 +436,7 @@ program.argument('[prompt...]', 'task for the agent').action(async (parts: strin
     await ask(Buffer.concat(chunks).toString().trim());
   }
 });
-program.command('chat').description('Start an interactive chat session').action(chat);
+program.command('chat').description('Start the interactive terminal workspace').action(tui);
 program
   .command('edit <path>')
   .description('Open a workspace file in the configured editor')
@@ -337,7 +462,7 @@ program
       );
     });
   });
-program.command('tui').description('Start the full-screen terminal chat interface').action(tui);
+program.command('tui').description('Start the interactive terminal workspace').action(tui);
 program
   .command('models')
   .description('List models from the selected provider')

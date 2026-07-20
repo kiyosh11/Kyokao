@@ -25,7 +25,7 @@ It is a local command-line application with a full-screen terminal interface. Re
 - OpenAI-compatible provider client with streaming enabled by default for normal CLI runs.
 - Built-in presets for hosted and local endpoints; custom OpenAI-compatible endpoints are supported.
 - One-shot prompts, piped prompts, and a persistent full-screen interactive session by default.
-- An explicit `tui` command plus a line-oriented `chat` mode, both with syntax-highlighted Markdown code blocks.
+- Bare `kyokao`, `kyokao chat`, and `kyokao tui` open the same interactive terminal workspace in a TTY.
 - Permission modes for file mutations and shell commands.
 - Configurable editor launching, repository instruction files, model sampling/fallback controls, and enforceable per-run safety budgets.
 - Workspace-scoped file, search, shell, read-only Git, and HTTP GET tools.
@@ -104,14 +104,27 @@ A prompt is a one-shot run. Piped standard input is also used as a one-shot prom
 printf '%s\n' 'run the relevant tests and report failures' | kyokao
 ```
 
-For a persistent interactive session, run bare `kyokao` or `kyokao tui` in a TTY. On the first run, Kyokao opens a provider setup wizard, lets you choose a hosted or local preset, accepts an API key without echoing it, and saves the selected provider and model in the user config. Existing provider environment variables are used without being copied into that file; browser login is only available for providers with an explicit supported OAuth/device flow. The full-screen interface supports `/help`, `/clear`, and `/exit`; use `kyokao chat` for the line-oriented mode.
+For a persistent interactive session, run bare `kyokao`, `kyokao chat`, or `kyokao tui` in a TTY. On the first run, Kyokao opens a provider setup wizard, lets you choose a hosted or local preset, accepts an API key without echoing it, and saves the selected provider and model in the user config. Existing provider environment variables are used without being copied into that file; browser login is only available for providers with an explicit supported OAuth/device flow.
 
 ```bash
 kyokao
-# full-screen Kyokao interface
-# type a task, then press Enter
-# /help, /clear, or /exit
+# terminal workspace: header, scrollable transcript, composer, and command palette
+# Enter submits; Alt-Enter inserts a newline where the terminal supports it; Ctrl-C cancels an active request or exits when idle
+# type / to filter commands, then use Up/Down and Enter
 ```
+
+The workspace keeps one local session until `/new`. It streams provider output, tool activity, and tool results into the transcript. It only shows token and cost estimates returned or calculated by the existing agent; it does not claim hidden reasoning or exact provider billing.
+
+| Slash command                                         | Purpose                                                                                                                                                |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/help [command]`                                     | Show command help and argument syntax.                                                                                                                 |
+| `/new`, `/clear`, `/exit`                             | Start a new session, clear visible output, or leave the workspace.                                                                                     |
+| `/sessions`, `/resume <id>`                           | List or resume local sessions.                                                                                                                         |
+| `/model [id]`, `/provider [name]`, `/approval [mode]` | Inspect or change the active runtime setting. Provider/model changes apply to later requests; approval accepts `suggest`, `auto-edit`, or `full-auto`. |
+| `/memory [list\|set <key> <value>\|delete <key>]`     | Inspect or manage local memory.                                                                                                                        |
+| `/doctor`, `/diff`                                    | Run setup diagnostics or show the workspace diff.                                                                                                      |
+
+Unknown slash commands are rejected locally and are never sent to the model. One-shot prompts and piped standard input remain script-friendly and do not start the workspace.
 
 From source, replace `kyokao` in the examples with `pnpm --filter kyokao start`:
 
@@ -142,12 +155,12 @@ pnpm --filter kyokao start -p groq -m llama-3.3-70b-versatile "inspect this repo
 | `-V, --version`          | Print the CLI version.                                                                                 |
 | `-h, --help`             | Print help.                                                                                            |
 
-The default invocation accepts `[prompt...]`: with words it runs them as one prompt; without words it starts `chat` in a TTY, or reads all piped standard input otherwise.
+The default invocation accepts `[prompt...]`: with words it runs them as one prompt; without words it starts the terminal workspace in a TTY, or reads all piped standard input otherwise. `chat` is a compatibility alias for that workspace.
 
 | Command                    | What it does                                                                                               | Example                                                         |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `chat`                     | Starts the line-oriented interactive loop.                                                                 | `kyokao chat`                                                   |
-| `tui`                      | Starts the full-screen terminal chat interface.                                                            | `kyokao tui`                                                    |
+| `chat`                     | Starts the interactive terminal workspace.                                                                 | `kyokao chat`                                                   |
+| `tui`                      | Starts the interactive terminal workspace.                                                                 | `kyokao tui`                                                    |
 | `models`                   | Requests `/models` from the selected provider and prints returned IDs.                                     | `kyokao -p openrouter models`                                   |
 | `catalog`                  | Prints known context, pricing, and tool-capability metadata.                                               | `kyokao catalog`                                                |
 | `usage [id]`               | Prints saved token, cost, and compression usage for one or all sessions.                                   | `kyokao usage`                                                  |
