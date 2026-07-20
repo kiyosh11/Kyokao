@@ -403,7 +403,7 @@ export async function loadPlugins(paths: string[], cwd = process.cwd()): Promise
   const loaded: ToolExecutor[] = [];
   for (const rawPath of paths) {
     const path = resolve(cwd, rawPath);
-    const module = await import(pathToFileURL(path).href);
+    const module = await import(/* @vite-ignore */ pathToFileURL(path).href);
     const plugin = (module.default ?? module.plugin) as Partial<KyokaoPlugin> | undefined;
     if (
       !plugin ||
