@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import {
   loadConfig,
+  readConfig,
   redact,
   resolveProvider,
   providerPresets,
@@ -86,6 +87,101 @@ function cliConfig(): Partial<KyokaoConfig> {
         ? { [o.provider ?? 'openai']: { baseURL: o.baseUrl, apiKey: o.apiKey } }
         : {},
   } as Partial<KyokaoConfig>;
+}
+async function promptSecret(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) throw new Error('API key setup requires an interactive terminal');
+  process.stdout.write(prompt);
+  const previousRaw = process.stdin.isRaw;
+  const previousEncoding = process.stdin.readableEncoding;
+  return await new Promise<string>((resolve, reject) => {
+    let value = '';
+    const cleanup = () => {
+      process.stdin.removeListener('data', onData);
+      process.stdin.setRawMode(previousRaw ?? false);
+      if (previousEncoding) process.stdin.setEncoding(previousEncoding);
+      process.stdout.write('\n');
+    };
+    const onData = (chunk: string) => {
+      for (const char of chunk) {
+        if (char === '\u0003') {
+          cleanup();
+          reject(new Error('API key setup cancelled'));
+          return;
+        }
+        if (char === '\r' || char === '\n') {
+          cleanup();
+          resolve(value);
+          return;
+        }
+        if (char === '\u007f') value = value.slice(0, -1);
+        else if (char >= ' ') value += char;
+      }
+    };
+    process.stdin.setRawMode(true);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', onData);
+  });
+}
+async function setupProvider(current: KyokaoConfig): Promise<void> {
+  const configuredProviders = Object.keys(current.providers);
+  const names = [...new Set([...Object.keys(providerPresets), ...configuredProviders])];
+  const line = createInterface({ input: process.stdin, output: process.stdout });
+  console.clear();
+  console.log('\n  KYOKAO SETUP\n');
+  console.log('  Choose a provider for your default workspace:\n');
+  names.forEach((name, index) => {
+    const preset = providerPresets[name];
+    const mode = preset && ['ollama', 'lmstudio', 'vllm'].includes(name) ? 'local' : 'API key';
+    console.log(`  ${String(index + 1).padStart(2, ' ')}. ${name.padEnd(12)} ${mode}`);
+  });
+  const choice = await line.question(
+    `\n  Provider [1-${names.length}] (default ${current.provider}): `,
+  );
+  const parsed = Number(choice);
+  const provider =
+    names[Number.isInteger(parsed) && parsed >= 1 && parsed <= names.length ? parsed - 1 : 0] ??
+    current.provider;
+  const model = (
+    await line.question(
+      `  Model ID (default ${current.model}; run "kyokao models" later to inspect): `,
+    )
+  ).trim();
+  line.close();
+  const preset = providerPresets[provider];
+  const existingKey = current.providers[provider]?.apiKey;
+  const environmentKey = preset?.env ? process.env[preset.env] : undefined;
+  const local = ['ollama', 'lmstudio', 'vllm'].includes(provider);
+  let apiKey = existingKey;
+  if (!local && !existingKey && !environmentKey)
+    apiKey = await promptSecret(`  ${preset?.env ?? 'API'} key (hidden): `);
+  console.log(
+    local
+      ? `\n  ${provider} uses a local server; no API key will be saved.`
+      : environmentKey
+        ? `\n  Using the existing ${preset?.env} environment variable; the key will not be saved.`
+        : '\n  Browser login is only offered for providers with an explicit supported OAuth flow; these presets use API keys.',
+  );
+  const saved = await readConfig(globalConfigPath());
+  const providers = { ...saved.providers, [provider]: { ...saved.providers?.[provider] } };
+  if (apiKey) providers[provider] = { ...providers[provider], apiKey };
+  else delete providers[provider]?.apiKey;
+  await atomicWrite(globalConfigPath(), {
+    ...saved,
+    provider,
+    model: model || current.model,
+    providers,
+  });
+  console.log(`  Saved provider setup to ${globalConfigPath()}\n`);
+}
+async function needsProviderSetup(): Promise<boolean> {
+  const options = program.opts();
+  if (options.provider || options.baseUrl || options.apiKey || options.model || options.profile)
+    return false;
+  const [global, local] = await Promise.all([
+    readConfig(globalConfigPath()),
+    readConfig(join(process.cwd(), '.kyokao.json')),
+  ]);
+  return !global.provider && !local.provider && !process.env.KYOKAO_PROVIDER;
 }
 async function runtime() {
   const config = await loadConfig({ cli: cliConfig(), profile: program.opts().profile });
@@ -188,6 +284,7 @@ async function chat() {
   }
 }
 async function tui() {
+  if (await needsProviderSetup()) await setupProvider(await loadConfig());
   const r = await runtime();
   try {
     await fullscreenChat(async (prompt) => {

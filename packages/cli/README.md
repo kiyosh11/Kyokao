@@ -71,7 +71,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.1.1.tgz
+npm install -g ./kyokao-0.1.2.tgz
 kyokao --help
 ```
 
@@ -85,7 +85,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.1.1.tgz
+npm install -g .\kyokao-0.1.2.tgz
 npm uninstall -g kyokao
 ```
 
@@ -104,7 +104,7 @@ A prompt is a one-shot run. Piped standard input is also used as a one-shot prom
 printf '%s\n' 'run the relevant tests and report failures' | kyokao
 ```
 
-For a persistent interactive session, run bare `kyokao` or `kyokao tui` in a TTY. The full-screen interface supports `/help`, `/clear`, and `/exit`; use `kyokao chat` for the line-oriented mode.
+For a persistent interactive session, run bare `kyokao` or `kyokao tui` in a TTY. On the first run, Kyokao opens a provider setup wizard, lets you choose a hosted or local preset, accepts an API key without echoing it, and saves the selected provider and model in the user config. Existing provider environment variables are used without being copied into that file; browser login is only available for providers with an explicit supported OAuth/device flow. The full-screen interface supports `/help`, `/clear`, and `/exit`; use `kyokao chat` for the line-oriented mode.
 
 ```bash
 kyokao
@@ -435,8 +435,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -446,7 +446,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.1.1.tgz
+TARBALL=kyokao-0.1.2.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -458,7 +458,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.1.1.tgz'
+$tarball = '.\kyokao-0.1.2.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help
