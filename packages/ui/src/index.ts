@@ -25,12 +25,20 @@ export function renderMarkdown(value: string): string {
       `\n${highlightCode(code.replace(/\n$/, ''), language)}\n`,
   );
 }
-type TranscriptEntry = { role: 'system' | 'user' | 'assistant'; text: string };
+type TranscriptEntry = {
+  role: 'system' | 'user' | 'assistant';
+  text: string;
+  at: string;
+};
 const commands = [
   ['/help', 'Show keyboard shortcuts and commands'],
   ['/clear', 'Clear the visible transcript'],
   ['/exit', 'Exit the terminal interface'],
 ] as const;
+const clock = () =>
+  new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase();
+const commandHelp =
+  'Commands: /help shows this message, /clear clears the transcript, and /exit closes Kyokao. Use PgUp/PgDn, Home/End, arrow keys, or the mouse wheel to scroll.';
 const wrapText = (value: string, width: number): string[] => {
   const lines: string[] = [];
   for (const source of value.split('\n')) {
@@ -49,10 +57,15 @@ const wrapText = (value: string, width: number): string[] => {
   }
   return lines;
 };
+export interface FullscreenChatOptions {
+  workspace?: string;
+  model?: string;
+}
 export async function fullscreenChat(
   onPrompt: (prompt: string) => Promise<string | undefined>,
   input: ReadStream = process.stdin,
   output: WriteStream = process.stdout,
+  options: FullscreenChatOptions = {},
 ): Promise<void> {
   if (!input.isTTY || !output.isTTY) throw new Error('tui requires an interactive terminal');
   const previousRaw = input.isRaw;
@@ -62,8 +75,8 @@ export async function fullscreenChat(
   let scrollOffset = 0;
   let commandIndex = 0;
   let transcript: TranscriptEntry[] = [
-    { role: 'system', text: 'Welcome to Kyokao. Type a task to begin.' },
-    { role: 'system', text: 'Type / to browse commands.' },
+    { role: 'system', text: 'Welcome to Kyokao. Type a task to begin.', at: clock() },
+    { role: 'system', text: 'Type / to browse commands.', at: clock() },
   ];
   const matches = () =>
     buffer.startsWith('/')
@@ -82,10 +95,17 @@ export async function fullscreenChat(
     commandIndex = Math.min(commandIndex, Math.max(0, suggestions.length - 1));
     const suggestionLines = suggestions.length ? Math.min(5, suggestions.length) + 1 : 0;
     const contentHeight = Math.max(3, height - 8 - suggestionLines);
-    const title = ' KYOKAO · local coding workspace';
+    const workspace = (options.workspace ?? process.cwd()).replace(
+      process.env.HOME ?? process.env.USERPROFILE ?? '',
+      '~',
+    );
+    const title = ` KYOKAO · ${workspace}`;
+    const model = options.model ? ` ${options.model} ` : ' ready ';
+    const innerWidth = width - 2;
+    const fittedTitle = title.slice(0, Math.max(1, innerWidth - model.length - 1));
     output.write(`${pc.dim('╭' + '─'.repeat(Math.max(0, width - 2)) + '╮')}\n`);
     output.write(
-      `│${pc.bold(pc.cyan(title))}${' '.repeat(Math.max(0, width - 2 - title.length))}│\n`,
+      `│${pc.bold(pc.cyan(fittedTitle))}${' '.repeat(Math.max(1, innerWidth - fittedTitle.length - model.length))}${pc.dim(model)}│\n`,
     );
     output.write(`${pc.dim('├' + '─'.repeat(Math.max(0, width - 2)) + '┤')}\n`);
     const rendered = transcript.flatMap((entry) => {
@@ -93,11 +113,21 @@ export async function fullscreenChat(
         entry.role === 'user'
           ? pc.cyan('› ')
           : entry.role === 'assistant'
-            ? pc.green('  ')
+            ? pc.green('· ')
             : pc.dim('· ');
-      return wrapText(entry.text, contentWidth).map(
-        (line, index) => `${index === 0 ? label : '  '}${renderMarkdown(line)}`,
-      );
+      const header =
+        entry.role === 'user'
+          ? `${pc.bold('You')} ${pc.dim(entry.at)}`
+          : entry.role === 'assistant'
+            ? `${pc.bold('Kyokao')} ${pc.dim(entry.at)}`
+            : `${pc.dim('System')} ${pc.dim(entry.at)}`;
+      return [
+        header,
+        ...wrapText(entry.text, contentWidth).map(
+          (line, index) => `${index === 0 ? label : '  '}${renderMarkdown(line)}`,
+        ),
+        '',
+      ];
     });
     const maxScroll = Math.max(0, rendered.length - contentHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -182,10 +212,7 @@ export async function fullscreenChat(
           if (prompt) {
             if (prompt === '/exit' || prompt === '/quit') return resolve();
             if (prompt === '/help') {
-              transcript.push({
-                role: 'system',
-                text: 'Commands: /help shows this message, /clear clears the transcript, /exit closes Kyokao. Use PgUp/PgDn or the mouse wheel to scroll the transcript.',
-              });
+              transcript.push({ role: 'system', text: commandHelp, at: clock() });
               buffer = '';
               scrollOffset = 0;
               return draw();
@@ -196,18 +223,28 @@ export async function fullscreenChat(
               scrollOffset = 0;
               return draw();
             }
-            transcript.push({ role: 'user', text: prompt });
+            if (prompt.startsWith('/')) {
+              transcript.push({
+                role: 'system',
+                text: `Unknown command "${prompt}". Type / to browse available commands.`,
+                at: clock(),
+              });
+              buffer = '';
+              return draw();
+            }
+            transcript.push({ role: 'user', text: prompt, at: clock() });
             buffer = '';
             scrollOffset = 0;
             busy = true;
             draw();
             try {
               const answer = await onPrompt(prompt);
-              if (answer) transcript.push({ role: 'assistant', text: answer });
+              if (answer) transcript.push({ role: 'assistant', text: answer, at: clock() });
             } catch (error) {
               transcript.push({
                 role: 'system',
                 text: error instanceof Error ? error.message : String(error),
+                at: clock(),
               });
             } finally {
               busy = false;

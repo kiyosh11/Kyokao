@@ -286,11 +286,18 @@ async function chat() {
 async function tui() {
   if (await needsProviderSetup()) await setupProvider(await loadConfig());
   const r = await runtime();
+  let session: Awaited<ReturnType<LocalStore['create']>> | undefined;
   try {
-    await fullscreenChat(async (prompt) => {
-      const session = await runPrompt(r, prompt, undefined, false);
-      return (session as typeof session & { __answer?: string }).__answer;
-    });
+    await fullscreenChat(
+      async (prompt) => {
+        const current = await runPrompt(r, prompt, session, false);
+        session = current;
+        return (current as typeof current & { __answer?: string }).__answer;
+      },
+      process.stdin,
+      process.stdout,
+      { workspace: r.root, model: r.config.model },
+    );
   } finally {
     await r.tools.close?.();
   }
