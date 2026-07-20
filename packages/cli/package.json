@@ -1,6 +1,6 @@
 {
   "name": "kyokao",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A safe, local-first coding agent",
   "type": "module",
   "bin": {

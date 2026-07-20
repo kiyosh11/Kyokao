@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed interactive setup and workspace screen ownership so real terminals use one balanced alternate-screen session and restore the previous shell display on every exit path.
+- Anchored the transcript, status, slash palette, bordered composer, and footer to the terminal height with Unicode-aware sizing and resize cleanup.
+- Added a cursor-based multiline editor with navigation, deletion, prompt history, slash completion, and bracketed-paste support.
+
 ## 0.3.0
 
 - Added the full-screen first-run provider, model, and approval setup flow.

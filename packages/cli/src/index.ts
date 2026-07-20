@@ -27,15 +27,17 @@ import { Agent, loadInstructionFiles } from '@kyokao/agent';
 import {
   setupWizard,
   terminalWorkspace,
+  withInteractiveScreen,
   ui,
   workspaceCommands,
+  type InteractiveScreen,
   type WorkspaceEmit,
 } from '@kyokao/ui';
 const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: a safe, local-first coding agent')
-  .version('0.3.0')
+  .version('0.3.1')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -106,7 +108,7 @@ async function needsProviderSetup(): Promise<boolean> {
   return !global.provider && !local.provider && !process.env.KYOKAO_PROVIDER;
 }
 
-async function setupProvider(confirmReplace = false): Promise<boolean> {
+async function setupProvider(confirmReplace = false, screen?: InteractiveScreen): Promise<boolean> {
   const saved = await readConfig(globalConfigPath());
   const localNames = new Set(['ollama', 'lmstudio', 'vllm']);
   const providers = [
@@ -134,6 +136,7 @@ async function setupProvider(confirmReplace = false): Promise<boolean> {
     providers,
     configPath: globalConfigPath(),
     confirmReplace,
+    screen,
     keySource: (provider) =>
       provider.local
         ? 'local'
@@ -273,10 +276,8 @@ async function ask(prompt: string, sessionId?: string) {
     await r.tools.close?.();
   }
 }
-async function tui() {
-  if (await needsProviderSetup()) {
-    if (!(await setupProvider())) return;
-  }
+async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
+  if (needsSetup && !(await setupProvider(false, screen))) return;
   let requestApproval: (action: string, detail: string) => Promise<boolean> = ui.approve;
   const approve = (action: string, detail: string) => requestApproval(action, detail);
   let r = await runtime({}, approve);
@@ -291,6 +292,7 @@ async function tui() {
   };
   try {
     await terminalWorkspace({
+      screen,
       header: () => ({
         workspace: r.root.replace(process.env.HOME ?? process.env.USERPROFILE ?? '', '~'),
         provider: r.config.provider,
@@ -412,6 +414,12 @@ async function tui() {
   } finally {
     await r.tools.close?.();
   }
+}
+async function tui() {
+  const needsSetup = await needsProviderSetup();
+  await withInteractiveScreen({}, async (screen) => {
+    await runTui(screen, needsSetup);
+  });
 }
 program.argument('[prompt...]', 'task for the agent').action(async (parts: string[]) => {
   if (parts.length) await ask(parts.join(' '));

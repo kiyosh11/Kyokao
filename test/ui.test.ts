@@ -1,11 +1,21 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
+  ALT_SCREEN_ENTER,
+  ALT_SCREEN_LEAVE,
+  BRACKETED_PASTE_DISABLE,
+  BRACKETED_PASTE_ENABLE,
+  CURSOR_SHOW,
+  EditorState,
   filterWorkspaceCommands,
+  layoutEditor,
   parseWorkspaceCommand,
+  renderWorkspaceScreen,
   selectPalette,
   terminalWorkspace,
+  TerminalInputParser,
   visiblePaletteCommands,
+  withInteractiveScreen,
   type WorkspaceEmit,
   renderSetupScreen,
   setupSelect,
@@ -50,6 +60,7 @@ class FakeOutput extends EventEmitter {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const plain = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+const count = (value: string, needle: string) => value.split(needle).length - 1;
 
 describe('terminal workspace helpers', () => {
   it('parses commands, filters the palette, and clamps selection', () => {
@@ -95,19 +106,21 @@ describe('terminal workspace helpers', () => {
       },
     });
     input.send('/he');
-    input.send('\n');
+    input.send('\r');
     await tick();
-    input.send('\n');
+    input.send('\r');
     await tick();
     input.send('write it');
-    input.send('\n');
+    input.send('\r');
     await tick();
-    input.send('/exit\n');
+    input.send('/exit\r');
     await done;
     expect(commands).toEqual(['help', 'exit']);
     expect(output.text).toContain('write_file: completed');
     expect(output.text).toContain('done');
     expect(input.isRaw).toBe(false);
+    expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
+    expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
   });
 
   it('cancels an active request before exiting and rejects non-TTY startup', async () => {
@@ -137,6 +150,8 @@ describe('terminal workspace helpers', () => {
     expect(aborted).toBe(true);
     input.send('\u0003');
     await done;
+    expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
+    expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
     const notTty = new FakeInput();
     notTty.isTTY = false;
     await expect(
@@ -173,15 +188,15 @@ describe('terminal workspace helpers', () => {
     for (let i = 0; i < 8; i++) input.send('\u001b[B');
     expect(plain(output.text)).toContain(`› /${filterWorkspaceCommands('/')[8]!.name}`);
     input.send('\u001b');
-    input.send('/doctor\n');
+    input.send('/doctor\r');
     await tick();
-    input.send('/model another\n');
+    input.send('/model another\r');
     input.send('\u0003');
     expect(commands).toEqual(['doctor']);
     expect(output.text).toContain('Command is running and cannot be cancelled.');
     release();
     await tick();
-    input.send('/exit\n');
+    input.send('/exit\r');
     await done;
   });
 
@@ -200,18 +215,280 @@ describe('terminal workspace helpers', () => {
         return command.name === 'exit' ? { close: true } : undefined;
       },
     });
-    input.send('approve\n');
+    input.send('approve\r');
     await tick();
     input.send('\u001b');
-    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 35));
     expect(decisions).toEqual([false]);
     expect(output.text).toContain('Approval denied.');
-    input.send('approve\n');
+    input.send('approve\r');
+    await tick();
+    input.send('y');
+    await tick();
+    expect(decisions).toEqual([false, true]);
+    input.send('approve\r');
     await tick();
     input.emit('close');
     await done;
     await tick();
-    expect(decisions).toEqual([false, false]);
+    expect(decisions).toEqual([false, true, false]);
+  });
+});
+
+describe('interactive screen lifecycle and editor', () => {
+  it('balances alternate screen, paste mode, cursor, raw mode, and exceptions exactly once', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    await expect(
+      withInteractiveScreen({ input: input as never, output: output as never }, async (screen) => {
+        screen.enter();
+        screen.draw({ lines: ['frame'], cursor: { row: 0, column: 2 } });
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
+    expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
+    expect(count(output.text, BRACKETED_PASTE_ENABLE)).toBe(1);
+    expect(count(output.text, BRACKETED_PASTE_DISABLE)).toBe(1);
+    expect(output.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
+    expect(input.isRaw).toBe(false);
+  });
+
+  it('uses a clearing fallback and emits nothing when interactive startup is rejected', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    await withInteractiveScreen(
+      { input: input as never, output: output as never, alternate: false },
+      async (screen) => screen.draw({ lines: ['temporary'] }),
+    );
+    expect(output.text).not.toContain(ALT_SCREEN_ENTER);
+    expect(output.text).not.toContain(ALT_SCREEN_LEAVE);
+    expect(output.text.endsWith('\x1b[H\x1b[2J')).toBe(true);
+
+    const nonTtyInput = new FakeInput();
+    const nonTtyOutput = new FakeOutput();
+    nonTtyInput.isTTY = false;
+    await expect(
+      withInteractiveScreen(
+        { input: nonTtyInput as never, output: nonTtyOutput as never },
+        async () => undefined,
+      ),
+    ).rejects.toThrow('TTY');
+    expect(nonTtyOutput.text).toBe('');
+  });
+
+  it('edits graphemes, words, lines, and multiline cursor positions', () => {
+    const editor = new EditorState('one 👩🏽‍💻 two\nsecond');
+    editor.cursor = 5;
+    editor.backspace();
+    expect(editor.text).toBe('one  two\nsecond');
+    editor.delete();
+    expect(editor.text).toBe('one two\nsecond');
+
+    editor.set('one\ntwo', 1);
+    editor.vertical(1);
+    expect(editor.cursor).toBe(5);
+    editor.home();
+    editor.insert('X');
+    editor.end();
+    editor.insert('!');
+    expect(editor.text).toBe('one\nXtwo!');
+
+    editor.set('alpha beta');
+    editor.wordLeft();
+    editor.deleteWordBefore();
+    expect(editor.text).toBe('beta');
+    editor.set('alpha beta');
+    editor.start();
+    editor.wordRight();
+    editor.killAfter();
+    expect(editor.text).toBe('alpha ');
+    editor.set('alpha beta', 6);
+    editor.killBefore();
+    expect(editor.text).toBe('beta');
+  });
+
+  it('parses split escapes, multiple keys, and bracketed multiline paste literally', () => {
+    const parser = new TerminalInputParser();
+    expect(parser.feed('\x1b')).toEqual([]);
+    expect(parser.feed('[D\x1b[C')).toEqual([
+      { type: 'key', key: 'left' },
+      { type: 'key', key: 'right' },
+    ]);
+    expect(parser.feed('\x1b[20')).toEqual([]);
+    expect(parser.feed('0~line 1\n/exit')).toEqual([]);
+    expect(parser.feed('\nline 3\x1b[20')).toEqual([]);
+    expect(parser.feed('1~')).toEqual([{ type: 'paste', text: 'line 1\n/exit\nline 3' }]);
+    expect(parser.feed('\x1b')).toEqual([]);
+    expect(parser.flushEscape()).toEqual([{ type: 'key', key: 'escape' }]);
+    expect(parser.feed('\x1b[3~\x1b[H\x1b[F\x01\x05\x15\x0b\x17\x1bb\x1bf')).toEqual([
+      { type: 'key', key: 'delete' },
+      { type: 'key', key: 'home' },
+      { type: 'key', key: 'end' },
+      { type: 'key', key: 'ctrl-a' },
+      { type: 'key', key: 'ctrl-e' },
+      { type: 'key', key: 'ctrl-u' },
+      { type: 'key', key: 'ctrl-k' },
+      { type: 'key', key: 'ctrl-w' },
+      { type: 'key', key: 'alt-left' },
+      { type: 'key', key: 'alt-right' },
+    ]);
+  });
+
+  it('anchors a bordered composer at the bottom and positions wrapped input cursor', () => {
+    const editor = new EditorState('alpha βeta gamma delta');
+    editor.left();
+    const frame = renderWorkspaceScreen({
+      width: 30,
+      height: 16,
+      header: { workspace: '~', provider: 'wide-provider', model: '模型', approval: 'suggest' },
+      transcript: [],
+      editor,
+    });
+    expect(frame.lines).toHaveLength(16);
+    expect(frame.lines.at(-2)).toContain('╰');
+    expect(frame.lines.some((line) => line.includes('Prompt'))).toBe(true);
+    expect(frame.cursor?.row).toBeGreaterThan(10);
+    expect(frame.lines.every((line) => plain(line).length <= 30)).toBe(true);
+
+    const layout = layoutEditor('1234567890🙂x', 11, 8);
+    expect(layout.rows.length).toBeGreaterThan(1);
+    expect(layout.cursor.row).toBeGreaterThan(0);
+
+    const short = renderWorkspaceScreen({
+      width: 20,
+      height: 8,
+      header: { workspace: '~', provider: 'p', model: 'm', approval: 'suggest' },
+      transcript: [],
+      editor: new EditorState('x'),
+    });
+    expect(short.lines).toHaveLength(8);
+    expect(short.cursor?.row).toBeLessThan(8);
+    expect(short.lines.at(-1)).toContain('╰');
+  });
+
+  it('supports editor bindings, history draft restoration, literal paste, and tab completion', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const prompts: string[] = [];
+    const commands: string[] = [];
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt(prompt) {
+        prompts.push(prompt);
+      },
+      async onCommand(command) {
+        commands.push(command.name ?? 'unknown');
+        return command.name === 'exit' ? { close: true } : undefined;
+      },
+    });
+    input.send('abcd\x1b[D\x1b[D\x1b[3~\x7f\x01X\x05Z\r');
+    await tick();
+    input.send('second\r');
+    await tick();
+    input.send('draft\x1b[A\x1b[B\r');
+    await tick();
+    input.send('\x1b[200~line 1\n/exit\nline 3\x1b[201~');
+    await tick();
+    expect(commands).toEqual([]);
+    input.send('\r');
+    await tick();
+    input.send('/he\t\r');
+    await tick();
+    input.send('history draft\x1b[A\x1b[B\r');
+    await tick();
+    input.send('/exit\r');
+    await done;
+    expect(prompts).toEqual(['XadZ', 'second', 'draft', 'line 1\n/exit\nline 3', 'history draft']);
+    expect(commands).toEqual(['help', 'exit']);
+    expect(output.text).toContain(CURSOR_SHOW);
+  });
+
+  it('cleans stale palette rows and restores the screen on close and Ctrl-C', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt() {},
+      async onCommand() {},
+    });
+    input.send('/');
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).toContain('Commands');
+    input.send('\x1b');
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).not.toContain('Commands');
+    output.columns = 30;
+    output.rows = 14;
+    output.emit('resize');
+    const resized = plain(output.text.split('\x1b[2J').at(-1)!);
+    expect(resized).toContain('Prompt');
+    expect(
+      resized
+        .split('\n')
+        .slice(0, 14)
+        .every((line) => line.length <= 30),
+    ).toBe(true);
+    output.emit('close');
+    await done;
+    expect(output.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
+
+    const interruptInput = new FakeInput();
+    const interruptOutput = new FakeOutput();
+    const interrupted = terminalWorkspace({
+      input: interruptInput as never,
+      output: interruptOutput as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt() {},
+      async onCommand() {},
+    });
+    interruptInput.send('\x03');
+    await interrupted;
+    expect(interruptOutput.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
+  });
+
+  it('shares one screen lifecycle across setup and workspace handoff', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const session = withInteractiveScreen(
+      { input: input as never, output: output as never },
+      async (screen) => {
+        const setup = setupWizard({
+          screen,
+          configPath: '/tmp/config.json',
+          providers: [{ name: 'ollama', description: 'Local', local: true }],
+        });
+        input.send('\r');
+        await tick();
+        input.send('model\r');
+        await tick();
+        input.send('\r');
+        await tick();
+        input.send('\r');
+        expect(await setup).toMatchObject({ provider: 'ollama', model: 'model' });
+        const workspace = terminalWorkspace({
+          screen,
+          header: () => ({
+            workspace: '~',
+            provider: 'ollama',
+            model: 'model',
+            approval: 'suggest',
+          }),
+          async onPrompt() {},
+          async onCommand(command) {
+            return command.name === 'exit' ? { close: true } : undefined;
+          },
+        });
+        input.send('/exit\r');
+        await workspace;
+      },
+    );
+    await session;
+    expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
+    expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
   });
 });
 
@@ -252,7 +529,8 @@ describe('first-run setup helpers', () => {
       ],
       keySource: (provider) => (provider.name === 'hosted' ? 'environment' : 'not configured'),
     });
-    input.send('\u001b[B');
+    input.send('\u001b');
+    input.send('[B');
     input.send('\n');
     await tick();
     input.send('llama3.2');
