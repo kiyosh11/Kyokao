@@ -7,10 +7,12 @@ import {
   BRACKETED_PASTE_ENABLE,
   CURSOR_SHOW,
   EditorState,
+  displayWidth,
   filterWorkspaceCommands,
   layoutEditor,
   parseWorkspaceCommand,
   renderWorkspaceScreen,
+  renderWorkspaceFooter,
   selectPalette,
   terminalWorkspace,
   TerminalInputParser,
@@ -118,6 +120,7 @@ describe('terminal workspace helpers', () => {
     expect(commands).toEqual(['help', 'exit']);
     expect(output.text).toContain('write_file: completed');
     expect(output.text).toContain('done');
+    expect(output.text).not.toContain('Ready. Type a task');
     expect(input.isRaw).toBe(false);
     expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
@@ -347,7 +350,11 @@ describe('interactive screen lifecycle and editor', () => {
     });
     expect(frame.lines).toHaveLength(16);
     expect(frame.lines.at(-2)).toContain('╰');
-    expect(frame.lines.some((line) => line.includes('Prompt'))).toBe(true);
+    const readyBorder = frame.lines.find((line) => line.includes('Ready'));
+    expect(readyBorder).toContain('├ Ready ');
+    expect(frame.lines.filter((line) => line.includes('Ready'))).toHaveLength(1);
+    expect(frame.lines.some((line) => line.includes('Prompt'))).toBe(false);
+    expect(frame.lines[frame.lines.indexOf(readyBorder!) + 1]).toContain('› alpha');
     expect(frame.cursor?.row).toBeGreaterThan(10);
     expect(frame.lines.every((line) => plain(line).length <= 30)).toBe(true);
 
@@ -365,6 +372,45 @@ describe('interactive screen lifecycle and editor', () => {
     expect(short.lines).toHaveLength(8);
     expect(short.cursor?.row).toBeLessThan(8);
     expect(short.lines.at(-1)).toContain('╰');
+  });
+
+  it('right-aligns footer usage and hides it before it can overlap the shortcut hint', () => {
+    const usage = { totalTokens: 904, estimatedCostUsd: 0 };
+    const wide = renderWorkspaceFooter(100, usage);
+    expect(displayWidth(wide)).toBe(100);
+    expect(
+      wide.startsWith('Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit'),
+    ).toBe(true);
+    expect(wide.endsWith('904 tokens · $0.0000 estimated')).toBe(true);
+
+    const narrow = renderWorkspaceFooter(54, usage);
+    expect(displayWidth(narrow)).toBe(54);
+    expect(narrow).not.toContain('904 tokens');
+    expect(narrow).toContain('Enter submit');
+  });
+
+  it('keeps usage updates out of the transcript', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    output.columns = 100;
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt(_prompt, emit) {
+        emit('assistant', 'complete');
+        emit('usage', { totalTokens: 904, estimatedCostUsd: 0 });
+      },
+      async onCommand(command) {
+        return command.name === 'exit' ? { close: true } : undefined;
+      },
+    });
+    input.send('work\r');
+    await tick();
+    input.send('/exit\r');
+    await done;
+    expect(plain(output.text)).toContain('904 tokens · $0.0000 estimated');
+    expect(plain(output.text)).not.toContain('Status');
   });
 
   it('supports editor bindings, history draft restoration, literal paste, and tab completion', async () => {
@@ -425,7 +471,7 @@ describe('interactive screen lifecycle and editor', () => {
     output.rows = 14;
     output.emit('resize');
     const resized = plain(output.text.split('\x1b[2J').at(-1)!);
-    expect(resized).toContain('Prompt');
+    expect(resized).toContain('Ready');
     expect(
       resized
         .split('\n')

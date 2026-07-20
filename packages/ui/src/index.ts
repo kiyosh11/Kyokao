@@ -202,7 +202,14 @@ export interface WorkspaceHeader {
   approval: string;
 }
 export type WorkspaceEventKind = TranscriptEntry['kind'];
-export type WorkspaceEmit = (kind: WorkspaceEventKind, text: string) => void;
+export interface WorkspaceUsage {
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+export interface WorkspaceEmit {
+  (kind: WorkspaceEventKind, text: string): void;
+  (kind: 'usage', usage: WorkspaceUsage | undefined): void;
+}
 export interface WorkspaceCommandResult {
   close?: boolean;
   clear?: boolean;
@@ -237,6 +244,7 @@ export interface WorkspaceRenderState {
   scrollOffset?: number;
   paletteIndex?: number;
   animationFrame?: number;
+  usage?: WorkspaceUsage;
 }
 
 function border(width: number, left: string, right: string, label = ''): string {
@@ -247,6 +255,20 @@ function border(width: number, left: string, right: string, label = ''): string 
 
 function framed(value: string, width: number): string {
   return `│${padDisplay(` ${value}`, Math.max(0, width - 2))}│`;
+}
+
+export function formatWorkspaceUsage(usage: WorkspaceUsage): string {
+  return `${usage.totalTokens.toLocaleString()} tokens · $${usage.estimatedCostUsd.toFixed(4)} estimated`;
+}
+
+export function renderWorkspaceFooter(width: number, usage?: WorkspaceUsage): string {
+  const hint = 'Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit';
+  const usageText = usage ? formatWorkspaceUsage(usage) : '';
+  if (usageText && displayWidth(hint) + displayWidth(usageText) + 2 <= width) {
+    const gap = ' '.repeat(width - displayWidth(hint) - displayWidth(usageText));
+    return `${hint}${gap}${usageText}`;
+  }
+  return padDisplay(hint, width);
 }
 
 export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame & {
@@ -270,7 +292,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   );
   const visibleComposer = editorLayout.rows.slice(composerStart, composerStart + composerRows);
   const footerRows = height >= 9 ? 1 : 0;
-  const fixedRows = 6 + composerRows + footerRows;
+  const fixedRows = 5 + composerRows + footerRows;
   const paletteLimit = Math.max(0, Math.min(5, height - fixedRows - 2));
   const paletteWindow = visiblePaletteCommands(matches, paletteIndex, Math.max(1, paletteLimit));
   const paletteRows = matches.length && paletteLimit ? paletteWindow.commands.length : 0;
@@ -305,7 +327,6 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
     `│${theme.brand(fittedTitle)}${headerGap}${theme.muted(fittedMeta)}│`,
     theme.muted(border(width, '├', '┤')),
     ...transcriptRows,
-    framed(truncateDisplay(status, inner - 1), width),
   ];
   if (paletteRows) {
     lines.push(theme.muted(border(width, '├', '┤', 'Commands')));
@@ -325,23 +346,13 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
       );
     }
   }
-  lines.push(theme.muted(border(width, '├', '┤', 'Prompt')));
+  lines.push(theme.muted(border(width, '├', '┤', status)));
   for (const row of visibleComposer) lines.push(framed(row, width));
   lines.push(theme.muted(border(width, '╰', '╯')));
-  if (footerRows)
-    lines.push(
-      padDisplay(
-        state.busy
-          ? state.busyKind === 'command'
-            ? 'Command running'
-            : 'Ctrl-C cancel'
-          : 'Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit',
-        width,
-      ),
-    );
+  if (footerRows) lines.push(renderWorkspaceFooter(width, state.usage));
   while (lines.length < height) lines.splice(3, 0, framed('', width));
   if (lines.length > height) lines.splice(3, lines.length - height);
-  const composerTop = 3 + transcriptHeight + 1 + paletteBlock + 1;
+  const composerTop = 3 + transcriptHeight + paletteBlock + 1;
   const cursor = state.busy
     ? undefined
     : {
@@ -404,11 +415,19 @@ async function runTerminalWorkspace(
   let closed = false;
   let controller: AbortController | undefined;
   let approval: { action: string; detail: string; resolve: (allowed: boolean) => void } | undefined;
-  let transcript: TranscriptEntry[] = [
-    { kind: 'system', text: 'Ready. Type a task or / for commands.' },
-  ];
+  let transcript: TranscriptEntry[] = [];
+  let usage: WorkspaceUsage | undefined;
 
-  const emit: WorkspaceEmit = (kind, text) => {
+  const emit: WorkspaceEmit = (
+    kind: WorkspaceEventKind | 'usage',
+    value: string | WorkspaceUsage | undefined,
+  ) => {
+    if (kind === 'usage') {
+      usage = value as WorkspaceUsage | undefined;
+      draw();
+      return;
+    }
+    const text = value as string;
     const previous = transcript.at(-1);
     if (kind === 'assistant' && previous?.kind === 'assistant') previous.text += text;
     else transcript.push({ kind, text });
@@ -435,6 +454,7 @@ async function runTerminalWorkspace(
       scrollOffset,
       paletteIndex,
       animationFrame: Math.floor(Date.now() / 350) % 3,
+      usage,
     });
     const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -451,6 +471,7 @@ async function runTerminalWorkspace(
         scrollOffset,
         paletteIndex,
         animationFrame: Math.floor(Date.now() / 350) % 3,
+        usage,
       });
     screen.draw(frame);
   };
