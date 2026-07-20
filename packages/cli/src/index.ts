@@ -37,7 +37,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: a safe, local-first coding agent')
-  .version('0.3.1')
+  .version('0.3.2')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -230,7 +230,7 @@ async function runPrompt(
       maxCostUsd: r.config.limits.maxCostUsd,
       maxOutputChars: r.config.limits.maxOutputChars,
       modelInfo,
-      onEvent: (k, t) => {
+      onEvent: (k, t, usage) => {
         if (k === 'text') {
           streamed += t;
           events?.('assistant', t);
@@ -244,6 +244,9 @@ async function runPrompt(
         } else if (k === 'tool' || k === 'tool-result') {
           events?.('tool', t);
           if (render) ui.tool(t);
+        } else if (k === 'usage') {
+          events?.('usage', usage);
+          if (render) ui.info(t);
         } else {
           events?.('status', t);
           if (render) ui.info(t);
@@ -254,7 +257,6 @@ async function runPrompt(
     const session = await agent.run(prompt, existing);
     const status = `Session ${session.id} (${session.checkpoint})`;
     if (render) ui.info(status);
-    else events?.('status', status);
     return render ? session : Object.assign(session, { __answer: streamed });
   } catch (error) {
     if (controller.signal.aborted || signal?.aborted) {
@@ -327,6 +329,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
         }
         if (command.name === 'new') {
           session = undefined;
+          emit('usage', undefined);
           return { messages: [{ text: 'Started a new session.' }] };
         }
         if (command.name === 'sessions') {
@@ -345,6 +348,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           if (command.args.length !== 1)
             return { messages: [{ kind: 'error', text: 'Usage: /resume <session-id>' }] };
           session = await r.store.loadSession(command.args[0]!);
+          emit('usage', session.usage);
           return { messages: [{ text: `Resumed session ${session.id}.` }] };
         }
         if (command.name === 'model') {
@@ -414,12 +418,20 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
   } finally {
     await r.tools.close?.();
   }
+  return session
+    ? {
+        id: session.id,
+        usage: session.usage,
+      }
+    : undefined;
 }
 async function tui() {
   const needsSetup = await needsProviderSetup();
-  await withInteractiveScreen({}, async (screen) => {
-    await runTui(screen, needsSetup);
+  const session = await withInteractiveScreen({}, async (screen) => {
+    return await runTui(screen, needsSetup);
   });
+  if (session)
+    console.log(`Session ${session.id} · resume: kyokao resume ${session.id} "continue"`);
 }
 program.argument('[prompt...]', 'task for the agent').action(async (parts: string[]) => {
   if (parts.length) await ask(parts.join(' '));

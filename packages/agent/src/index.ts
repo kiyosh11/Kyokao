@@ -6,7 +6,7 @@ import {
   type TokenUsage,
 } from '@kyokao/providers';
 import type { ToolExecutor } from '@kyokao/tools';
-import type { LocalStore, Session } from '@kyokao/memory';
+import type { LocalStore, Session, SessionUsage } from '@kyokao/memory';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -23,7 +23,11 @@ export interface AgentOptions {
   maxToolCalls?: number;
   maxCostUsd?: number;
   maxOutputChars?: number;
-  onEvent?: (kind: 'text' | 'tool' | 'tool-result' | 'assistant' | 'usage', text: string) => void;
+  onEvent?: (
+    kind: 'text' | 'tool' | 'tool-result' | 'assistant' | 'usage' | 'compression',
+    text: string,
+    usage?: SessionUsage,
+  ) => void;
   signal?: AbortSignal;
 }
 
@@ -150,7 +154,7 @@ export class Agent {
         };
         s.usage.compressedMessages += compacted.removed;
         this.options.onEvent?.(
-          'usage',
+          'compression',
           `compressed ${compacted.removed} messages (${estimateTokens(fullMessages)} → ${estimateTokens(compacted.messages)} tokens)`,
         );
       }
@@ -192,7 +196,8 @@ export class Agent {
         );
         this.options.onEvent?.(
           'usage',
-          `${observedUsage.totalTokens.toLocaleString()} tokens · $${s.usage!.estimatedCostUsd.toFixed(4)} estimated`,
+          `${s.usage!.totalTokens.toLocaleString()} tokens · $${s.usage!.estimatedCostUsd.toFixed(4)} estimated`,
+          s.usage,
         );
       }
       const m = response!.message;

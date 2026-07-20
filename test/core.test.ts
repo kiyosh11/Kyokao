@@ -175,14 +175,16 @@ describe('OpenAI SDK streaming transcript', () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
     const store = new LocalStore(join(dir, '.kyokao'));
     const text: string[] = [];
+    const usageTotals: number[] = [];
     const agent = new Agent({
       provider: new OpenAICompatibleProvider({ baseURL: url, model: 'fake' }),
       tools: new CoreTools(new WorkspaceSandbox(dir), 'full-auto'),
       store,
       maxIterations: 4,
       workspace: dir,
-      onEvent: (kind, value) => {
+      onEvent: (kind, value, usage) => {
         if (kind === 'text') text.push(value);
+        if (kind === 'usage' && usage) usageTotals.push(usage.totalTokens);
       },
     });
     const session = await agent.run('write it');
@@ -200,6 +202,8 @@ describe('OpenAI SDK streaming transcript', () => {
       content: 'Wrote answer.txt',
     });
     await agent.run('continue', await store.loadSession(session.id));
+    expect(usageTotals).toHaveLength(3);
+    expect(usageTotals[2]).toBeGreaterThan(usageTotals[1]!);
     expect(
       requests[2].messages
         .filter((message: any) => message.role === 'user')
