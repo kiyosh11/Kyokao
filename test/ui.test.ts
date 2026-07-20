@@ -6,6 +6,10 @@ import {
   BRACKETED_PASTE_DISABLE,
   BRACKETED_PASTE_ENABLE,
   CURSOR_SHOW,
+  ENHANCED_KEYBOARD_DISABLE,
+  ENHANCED_KEYBOARD_ENABLE,
+  MODIFY_OTHER_KEYS_DISABLE,
+  MODIFY_OTHER_KEYS_ENABLE,
   EditorState,
   displayWidth,
   filterWorkspaceCommands,
@@ -168,6 +172,79 @@ describe('terminal workspace helpers', () => {
     ).rejects.toThrow('TTY');
   });
 
+  it('edits while active, queues with Ctrl-Enter, and replaces in the same session order', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    output.columns = 110;
+    output.rows = 60;
+    const prompts: string[] = [];
+    const releases = new Map<string, () => void>();
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt(prompt, emit, signal) {
+        prompts.push(prompt);
+        emit('assistant', `started ${prompt}`);
+        await new Promise<void>((resolve) => {
+          releases.set(prompt, resolve);
+          signal.addEventListener(
+            'abort',
+            () => {
+              emit('assistant', `\ntrailing ${prompt}`);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      },
+      async onCommand(command) {
+        return command.name === 'exit' ? { close: true } : undefined;
+      },
+    });
+    input.send('first\r');
+    await tick();
+    input.send('queued\n');
+    await tick();
+    expect(plain(output.text)).toContain('Queue 1');
+    expect(plain(output.text)).toContain('Ctrl+Enter queue');
+    const queuedFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
+    expect(queuedFrame.split('\n').filter((line) => /\bYou\b/.test(line))).toHaveLength(1);
+    expect(queuedFrame).toContain('started first');
+    expect(queuedFrame).not.toContain('started queued');
+    input.send('replacement\r');
+    await tick();
+    expect(prompts).toEqual(['first', 'replacement']);
+    expect(plain(output.text)).toContain('Stopping');
+    releases.get('replacement')!();
+    await tick();
+    expect(prompts).toEqual(['first', 'replacement', 'queued']);
+    releases.get('queued')!();
+    await tick();
+    input.send('line one\x1b[13;2uline two\r');
+    await tick();
+    expect(prompts.at(-1)).toBe('line one\nline two');
+    releases.get('line one\nline two')!();
+    await tick();
+    input.send('/exit\r');
+    await done;
+    const finalFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
+    const ordered = [
+      'first',
+      'started first',
+      'trailing first',
+      'Request cancelled.',
+      'replacement',
+      'started replacement',
+      'queued',
+      'started queued',
+    ].map((value) => finalFrame.indexOf(value));
+    expect(ordered.every((index) => index >= 0)).toBe(true);
+    expect(ordered).toEqual([...ordered].sort((a, b) => a - b));
+    expect(finalFrame.lastIndexOf('trailing first')).toBeLessThan(finalFrame.indexOf('queued'));
+    expect(input.isRaw).toBe(false);
+  });
+
   it('serializes commands and keeps a selected palette row visible after five entries', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -253,6 +330,20 @@ describe('interactive screen lifecycle and editor', () => {
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
     expect(count(output.text, BRACKETED_PASTE_ENABLE)).toBe(1);
     expect(count(output.text, BRACKETED_PASTE_DISABLE)).toBe(1);
+    expect(count(output.text, ENHANCED_KEYBOARD_ENABLE)).toBe(1);
+    expect(count(output.text, ENHANCED_KEYBOARD_DISABLE)).toBe(1);
+    expect(count(output.text, MODIFY_OTHER_KEYS_ENABLE)).toBe(1);
+    expect(count(output.text, MODIFY_OTHER_KEYS_DISABLE)).toBe(1);
+    expect(MODIFY_OTHER_KEYS_ENABLE).toBe('\x1b[>4;2m');
+    expect(MODIFY_OTHER_KEYS_DISABLE).toBe('\x1b[>4;0m');
+    expect(output.text).toContain(`${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}`);
+    expect(output.text).toContain(`${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}`);
+    expect(output.text.indexOf(ENHANCED_KEYBOARD_ENABLE)).toBeLessThan(
+      output.text.indexOf(MODIFY_OTHER_KEYS_ENABLE),
+    );
+    expect(output.text.indexOf(MODIFY_OTHER_KEYS_DISABLE)).toBeLessThan(
+      output.text.indexOf(ENHANCED_KEYBOARD_DISABLE),
+    );
     expect(output.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
     expect(input.isRaw).toBe(false);
   });
@@ -338,6 +429,49 @@ describe('interactive screen lifecycle and editor', () => {
     ]);
   });
 
+  it('distinguishes Shift/Ctrl/Alt Enter encodings and keeps paste literal', () => {
+    const parser = new TerminalInputParser();
+    expect(parser.feed('\x1b[13;2u\x1b[27;2;13~\x1b\r\x1b[13;5u\x1b[27;5;13~\n')).toEqual([
+      { type: 'key', key: 'newline' },
+      { type: 'key', key: 'newline' },
+      { type: 'key', key: 'newline' },
+      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'queue' },
+    ]);
+    expect(parser.feed('\x1b[200~a\nb\x1b[13;5u\x1b[201~')).toEqual([
+      { type: 'paste', text: 'a\nb\x1b[13;5u' },
+    ]);
+  });
+
+  it('parses control bindings while enhanced keyboard reporting is enabled', () => {
+    const parser = new TerminalInputParser();
+    expect(
+      parser.feed(
+        '\x1b[27;5;97~\x1b[27;5;99~\x1b[27;5;101~\x1b[27;5;106~\x1b[27;5;107~\x1b[27;5;117~\x1b[27;5;119~',
+      ),
+    ).toEqual([
+      { type: 'key', key: 'ctrl-a' },
+      { type: 'key', key: 'interrupt' },
+      { type: 'key', key: 'ctrl-e' },
+      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'ctrl-k' },
+      { type: 'key', key: 'ctrl-u' },
+      { type: 'key', key: 'ctrl-w' },
+    ]);
+    expect(
+      parser.feed('\x1b[97;5u\x1b[99;5u\x1b[101;5u\x1b[106;5u\x1b[107;5u\x1b[117;5u\x1b[119;5u'),
+    ).toEqual([
+      { type: 'key', key: 'ctrl-a' },
+      { type: 'key', key: 'interrupt' },
+      { type: 'key', key: 'ctrl-e' },
+      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'ctrl-k' },
+      { type: 'key', key: 'ctrl-u' },
+      { type: 'key', key: 'ctrl-w' },
+    ]);
+  });
+
   it('anchors a bordered composer at the bottom and positions wrapped input cursor', () => {
     const editor = new EditorState('alpha βeta gamma delta');
     editor.left();
@@ -376,11 +510,9 @@ describe('interactive screen lifecycle and editor', () => {
 
   it('right-aligns footer usage and hides it before it can overlap the shortcut hint', () => {
     const usage = { totalTokens: 904, estimatedCostUsd: 0 };
-    const wide = renderWorkspaceFooter(100, usage);
-    expect(displayWidth(wide)).toBe(100);
-    expect(
-      wide.startsWith('Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit'),
-    ).toBe(true);
+    const wide = renderWorkspaceFooter(130, usage);
+    expect(displayWidth(wide)).toBe(130);
+    expect(wide.startsWith('Enter submit · Shift/Alt newline · Ctrl+Enter queue')).toBe(true);
     expect(wide.endsWith('904 tokens · $0.0000 estimated')).toBe(true);
 
     const narrow = renderWorkspaceFooter(54, usage);
@@ -609,6 +741,46 @@ describe('first-run setup helpers', () => {
     input.send('\u0003');
     await expect(done).resolves.toBeUndefined();
     expect(input.isRaw).toBe(false);
+  });
+
+  it('selects a discovered Capy model and remote project without rendering credentials', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = setupWizard({
+      input: input as never,
+      output: output as never,
+      configPath: '/tmp/kyokao.json',
+      providers: [
+        {
+          name: 'capy',
+          description: 'Remote agent',
+          remote: true,
+          env: 'CAPY_API_KEY',
+          baseURL: 'https://capy.ai/api/v1',
+        },
+      ],
+      keySource: () => 'environment',
+      fetchModels: async () => ['captain-model'],
+      fetchProjects: async () => [{ id: 'project-1', name: 'Project', description: 'owner/repo' }],
+    });
+    input.send('\r');
+    await tick();
+    input.send('\r');
+    await tick();
+    input.send('\r');
+    await tick();
+    input.send('\r');
+    await tick();
+    input.send('\r');
+    await tick();
+    input.send('\r');
+    await expect(done).resolves.toMatchObject({
+      provider: 'capy',
+      model: 'captain-model',
+      projectId: 'project-1',
+    });
+    expect(plain(output.text)).toContain('remote connected repositories');
+    expect(output.text).not.toContain('secret');
   });
 });
 

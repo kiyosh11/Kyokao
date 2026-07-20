@@ -8,6 +8,7 @@
     "dist"
   ],
   "dependencies": {
+    "@kyokao/agent": "workspace:*",
     "picocolors": "^1.1.1"
   },
   "scripts": {

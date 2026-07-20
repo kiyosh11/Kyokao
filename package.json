@@ -1,7 +1,7 @@
 {
   "name": "kyokao-workspace",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.4.0",
   "packageManager": "pnpm@10.31.0",
   "engines": {
     "node": ">=20"
@@ -27,7 +27,7 @@
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
-  "description": "Kyokao is a local-first TypeScript coding-agent CLI for Node 20+. It uses OpenAI-compatible APIs and exposes a deliberately small, permissioned tool surface.",
+  "description": "Kyokao is a TypeScript coding-agent CLI with local OpenAI-compatible and Capy remote backends.",
   "main": "index.js",
   "directories": {
     "test": "test"

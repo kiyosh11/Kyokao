@@ -6,6 +6,10 @@ export const BRACKETED_PASTE_ENABLE = '\x1b[?2004h';
 export const BRACKETED_PASTE_DISABLE = '\x1b[?2004l';
 export const CURSOR_HIDE = '\x1b[?25l';
 export const CURSOR_SHOW = '\x1b[?25h';
+export const ENHANCED_KEYBOARD_ENABLE = '\x1b[>1u';
+export const ENHANCED_KEYBOARD_DISABLE = '\x1b[<u';
+export const MODIFY_OTHER_KEYS_ENABLE = '\x1b[>4;2m';
+export const MODIFY_OTHER_KEYS_DISABLE = '\x1b[>4;0m';
 
 export interface ScreenFrame {
   lines: string[];
@@ -25,6 +29,7 @@ export class InteractiveScreen {
   private entered = false;
   private previousRaw = false;
   private previousEncoding: BufferEncoding | null = null;
+  private enhancedKeyboard = false;
   private readonly onProcessExit = () => this.leave();
 
   constructor(options: InteractiveScreenOptions = {}) {
@@ -45,9 +50,12 @@ export class InteractiveScreen {
     this.input.setRawMode(true);
     this.input.setEncoding('utf8');
     this.input.resume();
+    this.enhancedKeyboard = process.env.TERM !== 'dumb';
     process.once('exit', this.onProcessExit);
     this.output.write(
-      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${CURSOR_SHOW}`,
+      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${
+        this.enhancedKeyboard ? `${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}` : ''
+      }${CURSOR_SHOW}`,
     );
   }
 
@@ -71,9 +79,9 @@ export class InteractiveScreen {
     process.removeListener('exit', this.onProcessExit);
     try {
       this.output.write(
-        `${CURSOR_SHOW}${BRACKETED_PASTE_DISABLE}${
-          this.alternate ? ALT_SCREEN_LEAVE : '\x1b[H\x1b[2J'
-        }`,
+        `${CURSOR_SHOW}${
+          this.enhancedKeyboard ? `${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}` : ''
+        }${BRACKETED_PASTE_DISABLE}${this.alternate ? ALT_SCREEN_LEAVE : '\x1b[H\x1b[2J'}`,
       );
     } catch {
       // The terminal may already be closed.

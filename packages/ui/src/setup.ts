@@ -12,7 +12,7 @@ import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './te
 import { theme } from './theme.js';
 
 export type SetupStep =
-  'confirm' | 'provider' | 'name' | 'url' | 'key' | 'model' | 'approval' | 'review';
+  'confirm' | 'provider' | 'name' | 'url' | 'key' | 'model' | 'project' | 'approval' | 'review';
 export type KeySource = 'environment' | 'saved' | 'not configured' | 'local';
 export interface SetupProvider {
   name: string;
@@ -20,6 +20,7 @@ export interface SetupProvider {
   baseURL?: string;
   local?: boolean;
   env?: string;
+  remote?: boolean;
 }
 export interface SetupResult {
   provider: string;
@@ -28,6 +29,7 @@ export interface SetupResult {
   approval: 'suggest' | 'auto-edit' | 'full-auto';
   apiKey?: string;
   keySource: KeySource;
+  projectId?: string;
 }
 export interface SetupWizardOptions {
   input?: ReadStream;
@@ -42,6 +44,12 @@ export interface SetupWizardOptions {
     local?: boolean;
     signal: AbortSignal;
   }) => Promise<string[]>;
+  fetchProjects?: (choice: {
+    provider: string;
+    baseURL?: string;
+    apiKey?: string;
+    signal: AbortSignal;
+  }) => Promise<Array<{ id: string; name: string; description?: string }>>;
   confirmReplace?: boolean;
   screen?: InteractiveScreen;
 }
@@ -201,6 +209,8 @@ async function runSetupWizard(
   let model = '';
   let approval: SetupResult['approval'] = 'suggest';
   let models: string[] = [];
+  let projects: Array<{ id: string; name: string; description?: string }> = [];
+  let projectId = '';
   const draw = () => {
     const width = output.columns ?? 80;
     const height = output.rows ?? 28;
@@ -239,11 +249,26 @@ async function runSetupWizard(
         ],
         selected,
       });
+    if (step === 'project' && projects.length)
+      return screen('Choose a Capy project (remote repositories/VMs)', {
+        items: [
+          ...projects.map((project) => ({
+            name: project.name,
+            description: `${project.id}${project.description ? ` · ${project.description}` : ''}`,
+          })),
+          {
+            name: 'Manual project ID',
+            description: 'Explicit fallback when discovery is unavailable',
+          },
+        ],
+        selected,
+      });
     if (step === 'review')
       return screen('Review setup', {
         review: [
           `Provider: ${providerName}`,
           `Model: ${model}`,
+          ...(projectId ? [`Capy project: ${projectId} (remote connected repositories)`] : []),
           `Base URL: ${baseURL ?? 'preset'}`,
           `Key: ${keySource === 'local' ? 'not configured' : keySource}`,
           `Approval: ${approval}`,
@@ -258,30 +283,25 @@ async function runSetupWizard(
         ? `${provider.env} API key (optional; input is hidden)`
         : 'API key (optional; input is hidden)',
       model: 'Enter a model ID',
+      project: 'Enter a Capy project ID',
     };
     return screen(labels[step], { value, secret: step === 'key' });
   };
-  const fetchWithTimeout = async () => {
-    if (!options.fetchModels) return [];
+  const fetchWithTimeout = async <T>(request: (() => Promise<T>) | undefined, fallback: T) => {
+    if (!request) return fallback;
     fetchController = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const models = options.fetchModels({
-        provider: providerName,
-        baseURL,
-        apiKey,
-        local: provider.local,
-        signal: fetchController.signal,
-      });
-      const timedOut = new Promise<string[]>((resolve) => {
+      const pending = request();
+      const timedOut = new Promise<T>((resolve) => {
         timeout = setTimeout(() => {
           fetchController?.abort();
-          resolve([]);
+          resolve(fallback);
         }, 4000);
       });
-      return await Promise.race([models, timedOut]);
+      return await Promise.race([pending, timedOut]);
     } catch {
-      return [];
+      return fallback;
     } finally {
       if (timeout) clearTimeout(timeout);
       fetchController = undefined;
@@ -334,7 +354,32 @@ async function runSetupWizard(
       value = '';
       busy = true;
       draw();
-      models = await fetchWithTimeout();
+      models = await fetchWithTimeout(
+        options.fetchModels
+          ? () =>
+              options.fetchModels!({
+                provider: providerName,
+                baseURL,
+                apiKey,
+                local: provider.local,
+                signal: fetchController!.signal,
+              })
+          : undefined,
+        [],
+      );
+      if (provider.remote)
+        projects = await fetchWithTimeout(
+          options.fetchProjects
+            ? () =>
+                options.fetchProjects!({
+                  provider: providerName,
+                  baseURL,
+                  apiKey,
+                  signal: fetchController!.signal,
+                })
+            : undefined,
+          [],
+        );
       if (closed) return false;
       busy = false;
       step = 'model';
@@ -345,10 +390,21 @@ async function runSetupWizard(
       if (models.length && selected < models.length) {
         model = models[selected]!;
         selected = 0;
-        step = 'approval';
+        step = provider.remote ? 'project' : 'approval';
       } else {
         value = '';
         models = [];
+      }
+      return true;
+    }
+    if (step === 'project') {
+      if (projects.length && selected < projects.length) {
+        projectId = projects[selected]!.id;
+        selected = 0;
+        step = 'approval';
+      } else {
+        value = '';
+        projects = [];
       }
       return true;
     }
@@ -366,7 +422,8 @@ async function runSetupWizard(
     else if (step === 'url') step = 'name';
     else if (step === 'key') step = provider.name === '__custom__' ? 'url' : 'provider';
     else if (step === 'model') step = provider.local ? 'provider' : 'key';
-    else if (step === 'approval') step = 'model';
+    else if (step === 'project') step = 'model';
+    else if (step === 'approval') step = provider.remote ? 'project' : 'model';
     else step = 'approval';
     selected = 0;
     value = '';
@@ -400,9 +457,17 @@ async function runSetupWizard(
         if (
           step === 'review' &&
           event.type === 'key' &&
-          (event.key === 'enter' || event.key === 'newline')
+          (event.key === 'enter' || event.key === 'newline' || event.key === 'queue')
         )
-          return finish({ provider: providerName, baseURL, model, approval, apiKey, keySource });
+          return finish({
+            provider: providerName,
+            baseURL,
+            model,
+            approval,
+            apiKey,
+            keySource,
+            projectId: projectId || undefined,
+          });
         const listLength =
           step === 'confirm'
             ? 2
@@ -412,7 +477,9 @@ async function runSetupWizard(
                 ? approvalChoices.length
                 : step === 'model' && models.length
                   ? models.length + 1
-                  : 0;
+                  : step === 'project' && projects.length
+                    ? projects.length + 1
+                    : 0;
         const listDelta =
           event.type === 'key' && event.key === 'up'
             ? -1
@@ -428,7 +495,10 @@ async function runSetupWizard(
           draw();
           return;
         }
-        if (event.type === 'key' && (event.key === 'enter' || event.key === 'newline')) {
+        if (
+          event.type === 'key' &&
+          (event.key === 'enter' || event.key === 'newline' || event.key === 'queue')
+        ) {
           if (step === 'model' && !models.length) {
             if (!value.trim()) {
               message = 'Enter a model ID.';
@@ -436,6 +506,19 @@ async function runSetupWizard(
               return;
             }
             model = value.trim();
+            value = '';
+            selected = 0;
+            step = provider.remote ? 'project' : 'approval';
+            draw();
+            return;
+          }
+          if (step === 'project' && !projects.length) {
+            if (!value.trim()) {
+              message = 'Enter a project ID.';
+              draw();
+              return;
+            }
+            projectId = value.trim();
             value = '';
             selected = 0;
             step = 'approval';

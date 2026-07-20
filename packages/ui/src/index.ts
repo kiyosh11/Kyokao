@@ -14,6 +14,7 @@ import {
 } from './editor.js';
 import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
 import { theme } from './theme.js';
+import { PromptScheduler, type PromptBackend, type SchedulerState } from '@kyokao/agent';
 export { theme } from './theme.js';
 export * from './editor.js';
 export * from './terminal.js';
@@ -54,7 +55,9 @@ export type WorkspaceCommand =
   | 'approval'
   | 'memory'
   | 'doctor'
-  | 'diff';
+  | 'diff'
+  | 'queue'
+  | 'capy';
 
 export interface CommandDefinition {
   name: WorkspaceCommand;
@@ -85,6 +88,8 @@ export const workspaceCommands: readonly CommandDefinition[] = [
   },
   { name: 'doctor', syntax: '/doctor', description: 'Check local provider setup' },
   { name: 'diff', syntax: '/diff', description: 'Show the working-tree diff' },
+  { name: 'queue', syntax: '/queue [clear|retry]', description: 'List or manage queued prompts' },
+  { name: 'capy', syntax: '/capy', description: 'Show Capy remote thread status and links' },
   { name: 'clear', syntax: '/clear', description: 'Clear the visible transcript' },
   { name: 'exit', syntax: '/exit', description: 'Exit Kyokao' },
 ] as const;
@@ -220,7 +225,10 @@ export interface TerminalWorkspaceOptions {
   output?: WriteStream;
   screen?: InteractiveScreen;
   header: () => WorkspaceHeader;
-  onPrompt: (
+  backend?: PromptBackend;
+  onQueueChange?: (queue: readonly string[]) => Promise<void> | void;
+  onApprovalHandler?: (approve: (action: string, detail: string) => Promise<boolean>) => void;
+  onPrompt?: (
     prompt: string,
     emit: WorkspaceEmit,
     signal: AbortSignal,
@@ -229,7 +237,17 @@ export interface TerminalWorkspaceOptions {
   onCommand: (
     command: ParsedCommand,
     emit: WorkspaceEmit,
+    control: WorkspaceControl,
   ) => Promise<WorkspaceCommandResult | void>;
+}
+
+export interface WorkspaceControl {
+  scheduler: () => SchedulerState;
+  clearQueue: () => Promise<number>;
+  retryQueue: () => Promise<void>;
+  reset: () => Promise<void>;
+  cancelActive: () => Promise<void>;
+  enqueue: (prompt: string) => Promise<void>;
 }
 
 export interface WorkspaceRenderState {
@@ -245,6 +263,7 @@ export interface WorkspaceRenderState {
   paletteIndex?: number;
   animationFrame?: number;
   usage?: WorkspaceUsage;
+  scheduler?: SchedulerState;
 }
 
 function border(width: number, left: string, right: string, label = ''): string {
@@ -261,8 +280,10 @@ export function formatWorkspaceUsage(usage: WorkspaceUsage): string {
   return `${usage.totalTokens.toLocaleString()} tokens · $${usage.estimatedCostUsd.toFixed(4)} estimated`;
 }
 
-export function renderWorkspaceFooter(width: number, usage?: WorkspaceUsage): string {
-  const hint = 'Enter submit · Alt-Enter/Ctrl-J newline · / commands · Ctrl-C exit';
+export function renderWorkspaceFooter(width: number, usage?: WorkspaceUsage, busy = false): string {
+  const hint = busy
+    ? 'Enter replace · Shift/Alt+Enter newline · Ctrl+Enter queue'
+    : 'Enter submit · Shift/Alt newline · Ctrl+Enter queue · ^C exit';
   const usageText = usage ? formatWorkspaceUsage(usage) : '';
   if (usageText && displayWidth(hint) + displayWidth(usageText) + 2 <= width) {
     const gap = ' '.repeat(width - displayWidth(hint) - displayWidth(usageText));
@@ -279,11 +300,13 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   const height = Math.max(8, state.height);
   const inner = width - 2;
   const matches =
-    state.editor.text.startsWith('/') && !state.busy
+    state.editor.text.startsWith('/') && state.busyKind !== 'command'
       ? filterWorkspaceCommands(state.editor.text)
       : [];
   const paletteIndex = selectPalette(state.paletteIndex ?? 0, 0, matches.length);
   const editorLayout = layoutEditor(state.editor.text, state.editor.cursor, Math.max(1, inner - 1));
+  const queued = state.scheduler?.queue ?? [];
+  const queueRows = queued.length ? Math.min(2, queued.length) + 1 : 0;
   const maxComposerRows = Math.max(1, Math.floor(height / 3));
   const composerRows = Math.min(editorLayout.rows.length, maxComposerRows);
   const composerStart = Math.max(
@@ -292,7 +315,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   );
   const visibleComposer = editorLayout.rows.slice(composerStart, composerStart + composerRows);
   const footerRows = height >= 9 ? 1 : 0;
-  const fixedRows = 5 + composerRows + footerRows;
+  const fixedRows = 5 + composerRows + footerRows + queueRows;
   const paletteLimit = Math.max(0, Math.min(5, height - fixedRows - 2));
   const paletteWindow = visiblePaletteCommands(matches, paletteIndex, Math.max(1, paletteLimit));
   const paletteRows = matches.length && paletteLimit ? paletteWindow.commands.length : 0;
@@ -315,13 +338,19 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   );
   const status = state.approval
     ? `${state.approval.action}: ${state.approval.detail} [y/N]`
-    : state.busy
-      ? state.busyKind === 'command'
-        ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
-        : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
-      : scrollOffset
-        ? `Viewing earlier output (${scrollOffset} lines) · End returns`
-        : 'Ready';
+    : state.scheduler?.phase === 'stopping'
+      ? 'Stopping…'
+      : state.scheduler?.phase === 'starting-replacement'
+        ? 'Starting replacement…'
+        : state.scheduler?.phase === 'failed'
+          ? 'Queue paused after error · /queue retry'
+          : state.busy
+            ? state.busyKind === 'command'
+              ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
+              : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
+            : scrollOffset
+              ? `Viewing earlier output (${scrollOffset} lines) · End returns`
+              : 'Ready';
   const lines = [
     theme.muted(border(width, '╭', '╮')),
     `│${theme.brand(fittedTitle)}${headerGap}${theme.muted(fittedMeta)}│`,
@@ -346,19 +375,32 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
       );
     }
   }
+  if (queueRows) {
+    lines.push(theme.muted(border(width, '├', '┤', `Queue ${queued.length}`)));
+    for (const prompt of queued.slice(0, 2))
+      lines.push(framed(`• ${truncateDisplay(prompt.replace(/\n/g, ' ↵ '), inner - 3)}`, width));
+  }
   lines.push(theme.muted(border(width, '├', '┤', status)));
   for (const row of visibleComposer) lines.push(framed(row, width));
   lines.push(theme.muted(border(width, '╰', '╯')));
-  if (footerRows) lines.push(renderWorkspaceFooter(width, state.usage));
+  if (footerRows)
+    lines.push(
+      renderWorkspaceFooter(
+        width,
+        state.usage,
+        Boolean(state.scheduler?.active || state.scheduler?.phase === 'stopping'),
+      ),
+    );
   while (lines.length < height) lines.splice(3, 0, framed('', width));
   if (lines.length > height) lines.splice(3, lines.length - height);
-  const composerTop = 3 + transcriptHeight + paletteBlock + 1;
-  const cursor = state.busy
-    ? undefined
-    : {
-        row: composerTop + editorLayout.cursor.row - composerStart,
-        column: Math.min(width - 2, 2 + editorLayout.cursor.column),
-      };
+  const composerTop = 3 + transcriptHeight + paletteBlock + queueRows + 1;
+  const cursor =
+    state.busyKind === 'command' || state.approval
+      ? undefined
+      : {
+          row: composerTop + editorLayout.cursor.row - composerStart,
+          column: Math.min(width - 2, 2 + editorLayout.cursor.column),
+        };
   return { lines, cursor, palette: matches, transcriptHeight };
 }
 
@@ -413,10 +455,10 @@ async function runTerminalWorkspace(
   let scrollOffset = 0;
   let paletteIndex = 0;
   let closed = false;
-  let controller: AbortController | undefined;
   let approval: { action: string; detail: string; resolve: (allowed: boolean) => void } | undefined;
   let transcript: TranscriptEntry[] = [];
   let usage: WorkspaceUsage | undefined;
+  let schedulerState: SchedulerState = { phase: 'idle', queue: [] };
 
   const emit: WorkspaceEmit = (
     kind: WorkspaceEventKind | 'usage',
@@ -434,8 +476,53 @@ async function runTerminalWorkspace(
     scrollOffset = 0;
     draw();
   };
+  const legacyBackend: PromptBackend = {
+    provider: options.header().provider,
+    async run(prompt, backendEmit, signal) {
+      if (!options.onPrompt) throw new Error('No prompt backend configured');
+      await options.onPrompt(
+        prompt,
+        (kind: any, value: any) => backendEmit(kind, value),
+        signal,
+        askApproval,
+      );
+    },
+    async cancel() {},
+    async reset() {},
+    async resume() {
+      throw new Error('Resume is not supported by this workspace backend');
+    },
+    status: () => ({ provider: options.header().provider, state: schedulerState.phase }),
+    session: () => undefined,
+    async close() {},
+  };
+  const scheduler = new PromptScheduler({
+    backend: options.backend ?? legacyBackend,
+    emit: (kind, value) => {
+      if (kind === 'usage') emit('usage', value as WorkspaceUsage | undefined);
+      else emit(kind, String(value));
+    },
+    onState: (state) => {
+      schedulerState = state;
+      busy = Boolean(state.active) || ['stopping', 'starting-replacement'].includes(state.phase);
+      busyKind = busy ? 'prompt' : undefined;
+      draw();
+    },
+    onRunStart: (prompt) => emit('user', prompt),
+    onQueueChange: options.onQueueChange,
+  });
+  const control: WorkspaceControl = {
+    scheduler: () => scheduler.state(),
+    clearQueue: () => scheduler.clearQueue(),
+    retryQueue: () => scheduler.retry(),
+    reset: () => scheduler.reset(),
+    cancelActive: () => scheduler.cancelActive(),
+    enqueue: (prompt) => scheduler.submit(prompt, 'queue'),
+  };
   const palette = () =>
-    editor.text.startsWith('/') && !busy ? filterWorkspaceCommands(editor.text) : [];
+    editor.text.startsWith('/') && busyKind !== 'command'
+      ? filterWorkspaceCommands(editor.text)
+      : [];
   const draw = () => {
     if (closed) return;
     const matches = palette();
@@ -455,6 +542,7 @@ async function runTerminalWorkspace(
       paletteIndex,
       animationFrame: Math.floor(Date.now() / 350) % 3,
       usage,
+      scheduler: schedulerState,
     });
     const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -472,6 +560,7 @@ async function runTerminalWorkspace(
         paletteIndex,
         animationFrame: Math.floor(Date.now() / 350) % 3,
         usage,
+        scheduler: schedulerState,
       });
     screen.draw(frame);
   };
@@ -480,28 +569,15 @@ async function runTerminalWorkspace(
       approval = { action, detail, resolve };
       draw();
     });
+  options.onApprovalHandler?.(askApproval);
   const settleApproval = (allowed: boolean, message?: string) => {
     if (!approval) return;
     approval.resolve(allowed);
     approval = undefined;
     if (message) transcript.push({ kind: 'status', text: message });
   };
-  const runPrompt = async (prompt: string) => {
-    busy = true;
-    busyKind = 'prompt';
-    controller = new AbortController();
-    emit('user', prompt);
-    try {
-      await options.onPrompt(prompt, emit, controller.signal, askApproval);
-    } catch (error) {
-      if (controller.signal.aborted) emit('status', 'Request cancelled.');
-      else emit('error', error instanceof Error ? error.message : String(error));
-    } finally {
-      busy = false;
-      busyKind = undefined;
-      controller = undefined;
-      draw();
-    }
+  const runPrompt = async (prompt: string, mode: 'replace' | 'queue') => {
+    await scheduler.submit(prompt, mode);
   };
   const runCommand = async (raw: string) => {
     const parsed = parseWorkspaceCommand(raw)!;
@@ -514,7 +590,7 @@ async function runTerminalWorkspace(
     draw();
     let close = false;
     try {
-      const result = await options.onCommand(parsed, emit);
+      const result = await options.onCommand(parsed, emit, control);
       if (result?.clear) transcript = [];
       for (const message of result?.messages ?? []) emit(message.kind ?? 'system', message.text);
       close = result?.close === true;
@@ -523,8 +599,8 @@ async function runTerminalWorkspace(
       emit('error', error instanceof Error ? error.message : String(error));
       return false;
     } finally {
-      busy = false;
-      busyKind = undefined;
+      busy = Boolean(schedulerState.active);
+      busyKind = busy ? 'prompt' : undefined;
       if (!close) draw();
     }
   };
@@ -554,7 +630,7 @@ async function runTerminalWorkspace(
           return;
         }
         if (event.type === 'key' && event.key === 'interrupt') {
-          if (busyKind === 'prompt') controller?.abort();
+          if (busyKind === 'prompt') void scheduler.cancelActive();
           else if (busyKind === 'command')
             emit('status', 'Command is running and cannot be cancelled.');
           else resolve();
@@ -568,7 +644,7 @@ async function runTerminalWorkspace(
           }
           return;
         }
-        if (busy) return;
+        if (busyKind === 'command') return;
         if (event.type === 'paste') {
           history.detach();
           editor.insert(event.text.replace(/\r\n?/g, '\n'));
@@ -612,7 +688,15 @@ async function runTerminalWorkspace(
         else if (key === 'alt-left') editor.wordLeft();
         else if (key === 'alt-right') editor.wordRight();
         else if (key === 'newline') editor.insert('\n');
-        else if (key === 'tab' && palette().length) {
+        else if (key === 'queue') {
+          const prompt = editor.text.trim();
+          if (prompt && !prompt.startsWith('/')) {
+            history.add(prompt);
+            editor.set('');
+            paletteIndex = 0;
+            void runPrompt(prompt, 'queue');
+          }
+        } else if (key === 'tab' && palette().length) {
           editor.set(`/${palette()[paletteIndex]!.name} `);
           history.detach();
         } else if (key === 'enter') {
@@ -632,7 +716,7 @@ async function runTerminalWorkspace(
             paletteIndex = 0;
             if (prompt.startsWith('/')) {
               void runCommand(prompt).then((close) => close && resolve());
-            } else void runPrompt(prompt);
+            } else void runPrompt(prompt, 'replace');
           }
         }
         draw();
@@ -656,8 +740,8 @@ async function runTerminalWorkspace(
     closed = true;
     if (escapeTimer) clearTimeout(escapeTimer);
     clearInterval(ticker);
-    controller?.abort();
     settleApproval(false);
+    await scheduler.close();
     if (dataListener) input.removeListener('data', dataListener);
     if (streamFinish) {
       input.removeListener('close', streamFinish);

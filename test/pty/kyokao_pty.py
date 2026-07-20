@@ -21,9 +21,32 @@ ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class FakeProvider(BaseHTTPRequestHandler):
+    requests = []
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": "pty-model"}]})
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body.encode())))
+            self.end_headers()
+            self.wfile.write(body.encode())
+            return
+        self.send_error(404)
+
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
-        self.rfile.read(length)
+        request = json.loads(self.rfile.read(length))
+        FakeProvider.requests.append(request)
+        users = [message["content"] for message in request.get("messages", []) if message["role"] == "user"]
+        prompt = users[-1] if users else ""
+        if prompt == "first delayed":
+            time.sleep(5)
+        content = (
+            f"response:{prompt}"
+            if prompt in {"first delayed", "replacement", "queued", "line one\nline two"}
+            else "deterministic fake-provider response"
+        )
         chunks = [
             {
                 "id": "pty-response",
@@ -31,7 +54,7 @@ class FakeProvider(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": "deterministic fake-provider response"},
+                        "delta": {"content": content},
                         "finish_reason": None,
                     }
                 ],
@@ -57,7 +80,10 @@ class FakeProvider(BaseHTTPRequestHandler):
         self.send_header("content-type", "text/event-stream")
         self.send_header("content-length", str(len(body.encode())))
         self.end_headers()
-        self.wfile.write(body.encode())
+        try:
+            self.wfile.write(body.encode())
+        except BrokenPipeError:
+            pass
 
     def log_message(self, *_args):
         pass
@@ -142,7 +168,7 @@ def run(binary):
         )
         start = shell.command(command)
         shell.wait("Choose a provider", start)
-        shell.send("\x1b[B" * 11 + "\r")
+        shell.send("\x1b[B" * 12 + "\r")
         shell.wait("Enter a model ID", start)
         shell.send("pty-model\r")
         shell.wait("Choose approval mode", start)
@@ -161,7 +187,7 @@ def run(binary):
 
         mark = len(shell.output)
         shell.send("/model wrong\x17corrected\r")
-        shell.wait("Active model changed to corrected.", mark)
+        shell.wait("Active model changed to corrected; context was reset.", mark)
 
         mark = len(shell.output)
         shell.send("offline draft\x1b[A\x1b[B!")
@@ -170,13 +196,13 @@ def run(binary):
         shell.send("\x15")
 
         checks = [
-            ("/provider ollama", "Active provider changed to ollama."),
+            ("/provider ollama", "Active provider changed to ollama; incompatible context was reset."),
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
             ("/resume missing-session", "Error"),
             ("/memory list", "{}"),
             ("/doctor", "sandbox: enabled"),
             ("/diff", "Working tree"),
-            ("/new", "Started a new session."),
+            ("/new", "Cancelled work, cleared queue, and started a new session."),
         ]
         for value, expected in checks:
             mark = len(shell.output)
@@ -218,6 +244,7 @@ def run(binary):
         )
         with open(config_path, "w", encoding="utf-8") as config_file:
             json.dump(config, config_file)
+        command = command.replace(" --skip-model-check", "")
 
         start = shell.command(command)
         shell.wait("Ready", start)
@@ -228,6 +255,60 @@ def run(binary):
         before_exit = ANSI.sub("", shell.output[mark:])
         assert "Status" not in before_exit, "usage entered the transcript"
         assert "Session " not in before_exit, "session status appeared after a turn"
+        ready_after_turn = len(shell.output)
+        shell.wait("Ready", ready_after_turn)
+        approval_mark = len(shell.output)
+        shell.send("/approval full-auto\r")
+        shell.wait("Approval mode changed to full-auto.", approval_mark)
+        shell.wait("904 tokens · $0.0000 estimated", approval_mark)
+
+        mark = len(shell.output)
+        shell.send("first delayed\r")
+        shell.wait("Working", mark)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if any(
+                any(
+                    message.get("role") == "user" and message.get("content") == "first delayed"
+                    for message in request.get("messages", [])
+                )
+                for request in FakeProvider.requests
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("delayed provider request did not start")
+        shell.send("queued\n")
+        shell.wait("Queue 1", mark)
+        missing_session = "00000000-0000-4000-8000-000000000000"
+        invalid_commands = [
+            (f"/resume {missing_session}", f"Session not found: {missing_session}"),
+            ("/provider missing-provider", "Unknown provider: missing-provider"),
+            ("/model missing-model", 'Model "missing-model" is not available'),
+        ]
+        for invalid_command, expected in invalid_commands:
+            invalid_mark = len(shell.output)
+            shell.send(invalid_command + "\r")
+            shell.wait(expected, invalid_mark)
+            shell.wait("Queue 1", invalid_mark)
+            time.sleep(0.1)
+            shell.read()
+        shell.send("replacement\r")
+        shell.wait("Stopping", mark)
+        shell.wait("response:replacement", mark)
+        shell.wait("response:queued", mark)
+        ready_after_queue = len(shell.output)
+        shell.wait("Ready", ready_after_queue)
+        shell.send("line one\x1b[13;2uline two\r")
+        shell.wait("response:line one", mark)
+        request_users = [
+            [message["content"] for message in request["messages"] if message["role"] == "user"]
+            for request in FakeProvider.requests
+        ]
+        scheduled = [users[-1] for users in request_users if users and users[-1] in {"first delayed", "replacement", "queued", "line one\nline two"}]
+        assert scheduled == ["first delayed", "replacement", "queued", "line one\nline two"], scheduled
+        assert "respond deterministically" in request_users[-1], "approval change lost session context"
+        assert request_users[-1][-4:] == ["first delayed", "replacement", "queued", "line one\nline two"]
         ready_mark = len(shell.output)
         shell.wait("Ready", ready_mark)
         shell.send("/exit\r")
@@ -247,7 +328,7 @@ def run(binary):
         mark = len(shell.output)
         shell.send(f"/resume {session_id}\r")
         shell.wait(f"Resumed session {session_id}.", mark)
-        shell.wait("904 tokens · $0.0000 estimated", mark)
+        shell.wait("3,616 tokens · $0.0000 estimated", mark)
         ready_mark = len(shell.output)
         shell.wait("Ready", ready_mark)
         shell.send("\x03")
@@ -261,7 +342,7 @@ def run(binary):
         shell.send(f"/resume {session_id}\r")
         shell.wait(f"Resumed session {session_id}.", start)
         shell.send("/new\r")
-        shell.wait("Started a new session.", start)
+        shell.wait("Cancelled work, cleared queue, and started a new session.", start)
         shell.send("/exit\r")
         shell.wait(PROMPT, start)
         cleared = shell.output[start:]

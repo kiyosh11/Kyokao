@@ -14,7 +14,11 @@ import {
   effectiveSetupApiKey,
   type KyokaoConfig,
 } from '@kyokao/config';
-import { OpenAICompatibleProvider, modelCatalog as builtInModelCatalog } from '@kyokao/providers';
+import {
+  CapyClient,
+  OpenAICompatibleProvider,
+  modelCatalog as builtInModelCatalog,
+} from '@kyokao/providers';
 import {
   WorkspaceSandbox,
   CoreTools,
@@ -23,7 +27,14 @@ import {
   loadPlugins,
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
-import { Agent, loadInstructionFiles } from '@kyokao/agent';
+import {
+  Agent,
+  CapyRemoteBackend,
+  LocalAgentBackend,
+  loadInstructionFiles,
+  type BackendEmit,
+  type PromptBackend,
+} from '@kyokao/agent';
 import {
   setupWizard,
   terminalWorkspace,
@@ -36,8 +47,8 @@ import {
 const program = new Command();
 program
   .name('kyokao')
-  .description('Kyokao: a safe, local-first coding agent')
-  .version('0.3.2')
+  .description('Kyokao: local and Capy remote coding agents')
+  .version('0.4.0')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -119,7 +130,10 @@ async function setupProvider(confirmReplace = false, screen?: InteractiveScreen)
       local: localNames.has(name),
       description: localNames.has(name)
         ? `Local server at ${preset.baseURL}`
-        : `Hosted API (${preset.env})`,
+        : name === 'capy'
+          ? 'Capy remote agent (connected repositories and isolated VMs)'
+          : `Hosted API (${preset.env})`,
+      remote: preset.remote,
     })),
     ...Object.entries(saved.providers ?? {})
       .filter(([name]) => !providerPresets[name])
@@ -152,11 +166,31 @@ async function setupProvider(confirmReplace = false, screen?: InteractiveScreen)
         providerPresets[provider]?.env ? process.env[providerPresets[provider]!.env] : undefined,
       );
       if (!baseURL || (!local && !effectiveKey)) return [];
+      if (provider === 'capy')
+        return (await new CapyClient({ baseURL, apiKey: effectiveKey }).models(signal))
+          .filter((model) => model.captainEligible)
+          .map((model) => model.id);
       return await new OpenAICompatibleProvider({
         baseURL,
         apiKey: effectiveKey,
         model: 'setup',
       }).models(signal);
+    },
+    fetchProjects: async ({ provider, baseURL, apiKey, signal }) => {
+      if (provider !== 'capy') return [];
+      const effectiveKey = effectiveSetupApiKey(
+        apiKey,
+        saved.providers?.capy?.apiKey,
+        process.env.CAPY_API_KEY,
+      );
+      if (!effectiveKey) return [];
+      return (await new CapyClient({ baseURL, apiKey: effectiveKey }).projects(signal)).map(
+        (project) => ({
+          id: project.id,
+          name: project.name,
+          description: project.repos.map((repo) => repo.repoFullName).join(', ') || 'No repository',
+        }),
+      );
     },
   });
   if (!result) return false;
@@ -165,6 +199,7 @@ async function setupProvider(confirmReplace = false, screen?: InteractiveScreen)
     mergeProviderSetup(saved, {
       ...result,
       presetBaseURL: providerPresets[result.provider]?.baseURL,
+      projectId: result.projectId,
     }),
   );
   return true;
@@ -196,7 +231,12 @@ async function runtime(
   return {
     config,
     store,
-    provider: new OpenAICompatibleProvider(p),
+    provider: config.provider === 'capy' ? undefined : new OpenAICompatibleProvider(p),
+    capy:
+      config.provider === 'capy'
+        ? new CapyClient({ baseURL: p.baseURL, apiKey: p.apiKey })
+        : undefined,
+    providerOptions: p,
     tools,
     root,
     core,
@@ -212,49 +252,39 @@ async function runPrompt(
   signal?: AbortSignal,
 ) {
   const controller = new AbortController();
-  const onInterrupt = () => controller.abort();
+  const backend = await createBackend(r, existing);
+  let streamed = '';
+  const emit: BackendEmit = (kind, value) => {
+    if (kind === 'assistant') {
+      streamed += String(value);
+      events?.('assistant', String(value));
+      if (render) process.stdout.write(String(value));
+    } else if (kind === 'tool') {
+      events?.('tool', String(value));
+      if (render) ui.tool(String(value));
+    } else if (kind === 'usage') {
+      events?.('usage', value as any);
+      const usage = value as { totalTokens?: number; estimatedCostUsd?: number } | undefined;
+      if (render && usage)
+        ui.info(
+          `${(usage.totalTokens ?? 0).toLocaleString()} tokens · $${(
+            usage.estimatedCostUsd ?? 0
+          ).toFixed(4)} estimated`,
+        );
+    } else {
+      events?.(kind === 'error' ? 'error' : 'status', String(value));
+      if (render) (kind === 'error' ? ui.error : ui.info)(String(value));
+    }
+  };
+  const onInterrupt = () => {
+    void backend.cancel().finally(() => controller.abort());
+  };
   process.once('SIGINT', onInterrupt);
   try {
-    const modelInfo = program.opts().skipModelCheck ? undefined : await r.provider.validateModel();
-    let streamed = '';
-    const agent = new Agent({
-      provider: r.provider,
-      tools: r.tools,
-      store: r.store,
-      maxIterations: r.config.maxIterations,
-      workspace: r.root,
-      contextWindow: r.config.contextWindow,
-      compressionThreshold: r.config.compressionThreshold,
-      instructions: r.instructions,
-      maxToolCalls: r.config.limits.maxToolCalls,
-      maxCostUsd: r.config.limits.maxCostUsd,
-      maxOutputChars: r.config.limits.maxOutputChars,
-      modelInfo,
-      onEvent: (k, t, usage) => {
-        if (k === 'text') {
-          streamed += t;
-          events?.('assistant', t);
-          if (render) process.stdout.write(t);
-        } else if (k === 'assistant') {
-          if (!streamed) {
-            streamed = t;
-            events?.('assistant', t);
-          }
-          if (render) ui.assistant(t);
-        } else if (k === 'tool' || k === 'tool-result') {
-          events?.('tool', t);
-          if (render) ui.tool(t);
-        } else if (k === 'usage') {
-          events?.('usage', usage);
-          if (render) ui.info(t);
-        } else {
-          events?.('status', t);
-          if (render) ui.info(t);
-        }
-      },
-      signal: signal ?? controller.signal,
-    });
-    const session = await agent.run(prompt, existing);
+    const activeSignal = signal ?? controller.signal;
+    await backend.run(prompt, emit, activeSignal);
+    const session = backend.session();
+    if (!session) throw new Error('Backend completed without a session');
     const status = `Session ${session.id} (${session.checkpoint})`;
     if (render) ui.info(status);
     return render ? session : Object.assign(session, { __answer: streamed });
@@ -263,12 +293,75 @@ async function runPrompt(
       const status = 'Interrupted; session state was saved at the last completed tool checkpoint.';
       if (render) ui.error(status);
       else events?.('status', status);
-      return existing;
+      return backend.session() ?? existing;
     }
     throw error;
   } finally {
     process.removeListener('SIGINT', onInterrupt);
+    await backend.close();
   }
+}
+
+async function createBackend(
+  r: Awaited<ReturnType<typeof runtime>>,
+  existing?: Awaited<ReturnType<LocalStore['loadSession']>>,
+): Promise<PromptBackend> {
+  let backend: PromptBackend;
+  if (r.config.provider === 'capy') {
+    const projectId = r.config.providers.capy?.projectId;
+    if (!projectId || !r.capy) throw new Error('Capy project and credentials are not configured');
+    if (!program.opts().skipModelCheck) {
+      const model = (await r.capy.models()).find(
+        (item) => item.id === r.providerOptions.model && item.captainEligible,
+      );
+      if (!model)
+        throw new Error(
+          `Capy model "${r.providerOptions.model}" is unavailable or not Captain eligible.`,
+        );
+    }
+    backend = new CapyRemoteBackend({
+      client: r.capy,
+      store: r.store,
+      projectId,
+      model: r.providerOptions.model,
+    });
+  } else {
+    if (!r.provider) throw new Error('Local provider is not configured');
+    const modelInfo = program.opts().skipModelCheck ? undefined : await r.provider.validateModel();
+    backend = new LocalAgentBackend({
+      store: r.store,
+      createAgent: (agentSignal, emit) => {
+        let streamed = false;
+        return new Agent({
+          provider: r.provider!,
+          tools: r.tools,
+          store: r.store,
+          maxIterations: r.config.maxIterations,
+          workspace: r.root,
+          contextWindow: r.config.contextWindow,
+          compressionThreshold: r.config.compressionThreshold,
+          instructions: r.instructions,
+          maxToolCalls: r.config.limits.maxToolCalls,
+          maxCostUsd: r.config.limits.maxCostUsd,
+          maxOutputChars: r.config.limits.maxOutputChars,
+          modelInfo,
+          onEvent: (kind, text, usage) => {
+            if (kind === 'text') {
+              streamed = true;
+              emit('assistant', text);
+            } else if (kind === 'assistant') {
+              if (!streamed) emit('assistant', text);
+            } else if (kind === 'tool' || kind === 'tool-result') emit('tool', text);
+            else if (kind === 'usage') emit('usage', usage);
+            else emit('status', text);
+          },
+          signal: agentSignal,
+        });
+      },
+    });
+  }
+  if (existing) await backend.resume(existing);
+  return backend;
 }
 async function ask(prompt: string, sessionId?: string) {
   const r = await runtime();
@@ -283,34 +376,94 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
   let requestApproval: (action: string, detail: string) => Promise<boolean> = ui.approve;
   const approve = (action: string, detail: string) => requestApproval(action, detail);
   let r = await runtime({}, approve);
-  let session: Awaited<ReturnType<LocalStore['create']>> | undefined;
-  const replaceRuntime = async (overrides: Partial<KyokaoConfig>) => {
+  let backend = await createBackend(r);
+  const backendProxy: PromptBackend = {
+    get provider() {
+      return backend.provider;
+    },
+    run: (...args) => backend.run(...args),
+    cancel: () => backend.cancel(),
+    reset: () => backend.reset(),
+    resume: (session) => backend.resume(session),
+    status: () => backend.status(),
+    session: () => backend.session(),
+    close: () => backend.close(),
+  };
+  const replaceRuntime = async (
+    overrides: Partial<KyokaoConfig>,
+    options: {
+      preserveCompatibleSession?: boolean;
+      beforeSwap?: () => Promise<void>;
+    } = {},
+  ) => {
     const previous = r;
-    r = await runtime(
+    const previousBackend = backend;
+    const candidateProvider = overrides.provider ?? r.config.provider;
+    if (!providerPresets[candidateProvider] && !r.config.providers[candidateProvider])
+      throw new Error(`Unknown provider: ${candidateProvider}`);
+    const session = options.preserveCompatibleSession ? backend.session() : undefined;
+    const candidate = await runtime(
       { ...r.config, ...overrides, limits: { ...r.config.limits, ...overrides.limits } },
       approve,
     );
-    await previous.tools.close?.();
+    let candidateBackend!: PromptBackend;
+    try {
+      candidateBackend = await createBackend(candidate, session);
+      await options.beforeSwap?.();
+    } catch (error) {
+      await candidateBackend?.close().catch(() => {});
+      await candidate.tools.close?.().catch(() => {});
+      throw error;
+    }
+    try {
+      await previousBackend.close();
+      await previous.tools.close?.();
+    } catch (error) {
+      await candidateBackend.close().catch(() => {});
+      await candidate.tools.close?.().catch(() => {});
+      throw error;
+    }
+    r = candidate;
+    backend = candidateBackend;
   };
   try {
     await terminalWorkspace({
       screen,
+      backend: backendProxy,
+      onApprovalHandler: (handler) => {
+        requestApproval = handler;
+      },
+      onQueueChange: async (queue) => {
+        const session = backend.session();
+        if (!session) return;
+        session.pendingPrompts = [...queue];
+        await r.store.saveSession(session);
+      },
       header: () => ({
-        workspace: r.root.replace(process.env.HOME ?? process.env.USERPROFILE ?? '', '~'),
+        workspace:
+          r.config.provider === 'capy'
+            ? `remote:${r.config.providers.capy?.projectId ?? 'project-unset'}`
+            : r.root.replace(process.env.HOME ?? process.env.USERPROFILE ?? '', '~'),
         provider: r.config.provider,
         model: r.config.model,
         approval: r.config.approval,
       }),
-      onPrompt: async (prompt, emit, signal, approve) => {
-        if (signal.aborted) return;
-        requestApproval = approve;
-        const current = await runPrompt(r, prompt, session, false, emit, signal);
-        session = current;
-      },
-      onCommand: async (command, emit) => {
+      onCommand: async (command, emit, control) => {
         const arg = command.args.join(' ');
         if (!command.name) return { messages: [{ kind: 'error', text: 'Unknown command.' }] };
-        if (command.name === 'exit') return { close: true };
+        if (command.name === 'exit') {
+          const state = control.scheduler();
+          if (state.active || state.queue.length)
+            return {
+              messages: [
+                {
+                  kind: 'error',
+                  text: `Work remains (${state.active ? 'active request' : ''}${state.active && state.queue.length ? ', ' : ''}${state.queue.length ? `${state.queue.length} queued` : ''}). Ctrl-C cancels active work; /queue clear removes pending prompts.`,
+                },
+              ],
+            };
+          return { close: true };
+        }
         if (command.name === 'clear') return { clear: true };
         if (command.name === 'help') {
           const selected = command.args[0]?.replace(/^\//, '');
@@ -328,9 +481,11 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           };
         }
         if (command.name === 'new') {
-          session = undefined;
+          await control.reset();
           emit('usage', undefined);
-          return { messages: [{ text: 'Started a new session.' }] };
+          return {
+            messages: [{ text: 'Cancelled work, cleared queue, and started a new session.' }],
+          };
         }
         if (command.name === 'sessions') {
           const sessions = await r.store.listSessions();
@@ -347,19 +502,48 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
         if (command.name === 'resume') {
           if (command.args.length !== 1)
             return { messages: [{ kind: 'error', text: 'Usage: /resume <session-id>' }] };
-          session = await r.store.loadSession(command.args[0]!);
+          const session = await r.store.loadSession(command.args[0]!);
+          const pendingPrompts = [...(session.pendingPrompts ?? [])];
+          const candidateBackend = await createBackend(r, session);
+          const previousBackend = backend;
+          try {
+            await control.reset();
+          } catch (error) {
+            await candidateBackend.close().catch(() => {});
+            throw error;
+          }
+          try {
+            await previousBackend.close();
+          } catch (error) {
+            await candidateBackend.close().catch(() => {});
+            throw error;
+          }
+          backend = candidateBackend;
+          for (const prompt of pendingPrompts) await control.enqueue(prompt);
           emit('usage', session.usage);
           return { messages: [{ text: `Resumed session ${session.id}.` }] };
         }
         if (command.name === 'model') {
           if (!arg) return { messages: [{ text: `Active model: ${r.config.model}` }] };
-          await replaceRuntime({ model: arg });
-          return { messages: [{ text: `Active model changed to ${r.config.model}.` }] };
+          await replaceRuntime(
+            { model: arg },
+            {
+              beforeSwap: () => control.reset(),
+            },
+          );
+          return {
+            messages: [{ text: `Active model changed to ${r.config.model}; context was reset.` }],
+          };
         }
         if (command.name === 'provider') {
           if (!arg) return { messages: [{ text: `Active provider: ${r.config.provider}` }] };
           try {
-            await replaceRuntime({ provider: arg });
+            await replaceRuntime(
+              { provider: arg },
+              {
+                beforeSwap: () => control.reset(),
+              },
+            );
           } catch (error) {
             return {
               messages: [
@@ -367,7 +551,13 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
               ],
             };
           }
-          return { messages: [{ text: `Active provider changed to ${r.config.provider}.` }] };
+          return {
+            messages: [
+              {
+                text: `Active provider changed to ${r.config.provider}; incompatible context was reset.`,
+              },
+            ],
+          };
         }
         if (command.name === 'approval') {
           if (!arg) return { messages: [{ text: `Approval mode: ${r.config.approval}` }] };
@@ -375,7 +565,24 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
             return {
               messages: [{ kind: 'error', text: 'Usage: /approval <suggest|auto-edit|full-auto>' }],
             };
-          await replaceRuntime({ approval: arg as KyokaoConfig['approval'] });
+          const scheduler = control.scheduler();
+          if (
+            scheduler.active ||
+            scheduler.phase === 'stopping' ||
+            scheduler.phase === 'starting-replacement'
+          )
+            return {
+              messages: [
+                {
+                  kind: 'error',
+                  text: 'Wait for or cancel the active request before changing approval mode.',
+                },
+              ],
+            };
+          await replaceRuntime(
+            { approval: arg as KyokaoConfig['approval'] },
+            { preserveCompatibleSession: true },
+          );
           return { messages: [{ text: `Approval mode changed to ${r.config.approval}.` }] };
         }
         if (command.name === 'memory') {
@@ -397,27 +604,99 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           };
         }
         if (command.name === 'doctor') {
+          if (r.config.provider === 'capy') {
+            const models = await r.capy!.models();
+            const projects = await r.capy!.projects();
+            const projectId = r.config.providers.capy?.projectId;
+            const model = models.find((item) => item.id === r.config.model && item.captainEligible);
+            const project = projects.find((item) => item.id === projectId);
+            return {
+              messages: [
+                {
+                  text: `provider: capy (${r.capy!.baseURL})\ncredentials: ${r.providerOptions.apiKey ? 'configured' : 'missing'}\nmodel: ${model ? `${model.id} (Captain eligible)` : 'unavailable'}\nproject: ${project ? `${project.name} (${project.id})` : 'unavailable'}\nexecution: remote connected repositories/VMs; local uncommitted files are not used`,
+                },
+              ],
+            };
+          }
           const model = program.opts().skipModelCheck
             ? undefined
-            : await r.provider.validateModel();
+            : await r.provider!.validateModel();
           return {
             messages: [
               {
-                text: `node: ${process.version}\nworkspace: ${r.root}\nprovider: ${r.config.provider} (${r.provider.options.baseURL})\ncredentials: ${r.provider.options.apiKey ? 'configured' : 'missing'}\nmodel: ${model?.id ?? 'not checked'}\nsandbox: enabled`,
+                text: `node: ${process.version}\nworkspace: ${r.root}\nprovider: ${r.config.provider} (${r.provider!.options.baseURL})\ncredentials: ${r.provider!.options.apiKey ? 'configured' : 'missing'}\nmodel: ${model?.id ?? 'not checked'}\nsandbox: enabled`,
               },
             ],
           };
         }
         if (command.name === 'diff') {
+          if (r.config.provider === 'capy')
+            return {
+              messages: [
+                {
+                  kind: 'error',
+                  text: 'Capy edits remote connected repositories/VMs; inspect remote task or PR links with /capy.',
+                },
+              ],
+            };
           const result = await r.tools.execute('git', { args: ['diff', '--no-ext-diff'] });
           emit(result.isError ? 'error' : 'tool', result.content || 'Working tree is clean.');
           return;
+        }
+        if (command.name === 'queue') {
+          if (command.args[0] === 'clear') {
+            const cleared = await control.clearQueue();
+            return { messages: [{ text: `Cleared ${cleared} queued prompt(s).` }] };
+          }
+          if (command.args[0] === 'retry') {
+            await control.retryQueue();
+            return { messages: [{ text: 'Retrying queued prompt.' }] };
+          }
+          const queue = control.scheduler().queue;
+          return {
+            messages: [
+              {
+                text: queue.length
+                  ? queue.map((prompt, index) => `${index + 1}. ${prompt}`).join('\n')
+                  : 'Queue is empty.',
+              },
+            ],
+          };
+        }
+        if (command.name === 'capy') {
+          if (r.config.provider !== 'capy')
+            return { messages: [{ kind: 'error', text: 'Capy provider is not active.' }] };
+          const status = backend.status();
+          return {
+            messages: [
+              {
+                text: [
+                  `project: ${status.projectId}`,
+                  `thread: ${status.threadId ?? 'not created'}`,
+                  `run state: ${status.state}`,
+                  ...(status.waitingOn?.length
+                    ? [`waiting on: ${status.waitingOn.join(', ')}`]
+                    : []),
+                  ...(status.blockedOn?.length
+                    ? [`blocked on: ${status.blockedOn.join(', ')}`]
+                    : []),
+                  ...(status.tasks ?? []).map(
+                    (task) => `task: ${task.identifier} ${task.status} ${task.title}`,
+                  ),
+                  ...(status.pullRequests ?? []).map(
+                    (pull) => `PR: ${pull.repoFullName}#${pull.number} ${pull.url}`,
+                  ),
+                ].join('\n'),
+              },
+            ],
+          };
         }
       },
     });
   } finally {
     await r.tools.close?.();
   }
+  const session = backend.session();
   return session
     ? {
         id: session.id,
@@ -474,7 +753,10 @@ program
   .description('List models from the selected provider')
   .action(async () => {
     const r = await runtime();
-    for (const m of await r.provider.models()) console.log(m);
+    if (r.capy) {
+      for (const model of (await r.capy.models()).filter((model) => model.captainEligible))
+        console.log(`${model.id}\t${model.name}\t${model.provider}`);
+    } else for (const m of await r.provider!.models()) console.log(m);
   });
 program
   .command('catalog')
@@ -584,14 +866,33 @@ program
     const r = await runtime();
     console.log(`node: ${process.version}`);
     console.log(`workspace: ${r.root}`);
-    console.log(`provider: ${r.config.provider} (${r.provider.options.baseURL})`);
     console.log(
-      `credentials: ${r.provider.options.apiKey ? 'configured' : 'missing (set provider environment key or --api-key)'}`,
+      `provider: ${r.config.provider} (${r.capy?.baseURL ?? r.provider!.options.baseURL})`,
     );
-    console.log('sandbox: enabled');
-    if (!program.opts().skipModelCheck) {
-      const model = await r.provider.validateModel();
-      console.log(`model: ${model.id} (available)`);
+    console.log(
+      `credentials: ${r.providerOptions.apiKey ? 'configured' : 'missing (set provider environment key or --api-key)'}`,
+    );
+    if (r.capy) {
+      const [models, projects] = await Promise.all([r.capy.models(), r.capy.projects()]);
+      const model = models.find(
+        (item) => item.id === r.providerOptions.model && item.captainEligible,
+      );
+      const projectId = r.config.providers.capy?.projectId;
+      const project = projects.find((item) => item.id === projectId);
+      if (!model)
+        throw new Error(`Capy model "${r.providerOptions.model}" is not Captain eligible`);
+      if (!project) throw new Error(`Capy project "${projectId}" is not accessible`);
+      console.log(`model: ${model.id} (Captain eligible)`);
+      console.log(`project: ${project.name} (${project.id})`);
+      console.log(
+        'execution: remote connected repositories/VMs; local uncommitted files are not used',
+      );
+    } else {
+      console.log('sandbox: enabled');
+      if (!program.opts().skipModelCheck) {
+        const model = await r.provider!.validateModel();
+        console.log(`model: ${model.id} (available)`);
+      }
     }
     await r.tools.close?.();
   });

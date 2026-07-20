@@ -1,6 +1,6 @@
 # Kyokao
 
-Kyokao is a local-first TypeScript coding-agent CLI. It sends prompts and tool definitions to an OpenAI-compatible chat-completions API, then performs a bounded tool-call loop in the directory where it is run. Its tool surface is intentionally small and file paths are constrained to that workspace.
+Kyokao is a TypeScript coding-agent CLI with two first-class execution modes: a permissioned local tool loop using OpenAI-compatible APIs, and Capy's remote agent API for connected repositories and isolated VMs.
 
 It is a local command-line application with a full-screen terminal interface. Review generated changes before keeping or committing them.
 
@@ -22,7 +22,8 @@ It is a local command-line application with a full-screen terminal interface. Re
 
 ## Features
 
-- OpenAI-compatible provider client with streaming enabled by default for normal CLI runs.
+- OpenAI-compatible local provider client and a native Capy remote-agent backend.
+- Concurrent TUI composition with cancellation-safe replacement and FIFO queued follow-ups.
 - Built-in presets for hosted and local endpoints; custom OpenAI-compatible endpoints are supported.
 - One-shot prompts, piped prompts, and a persistent full-screen interactive session by default.
 - Bare `kyokao`, `kyokao chat`, and `kyokao tui` open the same interactive terminal workspace in a TTY.
@@ -71,7 +72,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.3.2.tgz
+npm install -g ./kyokao-0.4.0.tgz
 kyokao --help
 ```
 
@@ -85,7 +86,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.3.2.tgz
+npm install -g .\kyokao-0.4.0.tgz
 npm uninstall -g kyokao
 ```
 
@@ -122,11 +123,11 @@ Hosted API-key input is masked. A present preset environment variable is reporte
 ```bash
 kyokao
 # setup: Up/Down or j/k select, Enter continues, Escape goes back, Ctrl-C cancels
-# workspace: Enter submits; Alt-Enter or Ctrl-J inserts a newline
+# workspace: Enter submits/replaces; Shift-Enter or Alt-Enter inserts a newline; Ctrl-Enter queues
 # type / to filter commands, then use Up/Down and Enter
 ```
 
-The bordered composer supports Left/Right, Home/End, Backspace/Delete, Ctrl-A/Ctrl-E, Ctrl-U/Ctrl-K, Ctrl-W, and Alt-Left/Alt-Right. Up/Down moves within multiline input, selects slash commands while the palette is open, or browses prompt history for single-line input; PageUp/PageDown scrolls the transcript. Tab completes the selected slash command. Bracketed multiline paste is inserted literally and is not submitted until Enter.
+The bordered composer remains editable while an agent runs. Enter cancels/stops the active turn and starts the new prompt before existing queued work; Ctrl-Enter queues without interruption. Shift-Enter inserts a newline when the terminal reports CSI-u or xterm `modifyOtherKeys`; unsupported terminals and Windows terminal stacks that strip modifiers must use Alt-Enter as the compatibility fallback. Legacy Ctrl-J/LF is treated as Ctrl-Enter. Bracketed multiline paste remains literal. `/queue`, `/queue clear`, and `/queue retry` inspect, clear, and retry pending work.
 
 The workspace keeps one local session until `/new`. It streams provider output, tool activity, and tool results into the transcript. The composer border carries the current status, and cumulative token/cost usage appears at the right of the shortcut footer when space permits. On exit, the restored shell receives a resumable session command; `/new` clears that hint. Usage is returned or calculated by the existing agent and does not claim hidden reasoning or exact provider billing.
 
@@ -138,6 +139,7 @@ The workspace keeps one local session until `/new`. It streams provider output, 
 | `/model [id]`, `/provider [name]`, `/approval [mode]` | Inspect or change the active runtime setting. Provider/model changes apply to later requests; approval accepts `suggest`, `auto-edit`, or `full-auto`. |
 | `/memory [list\|set <key> <value>\|delete <key>]`     | Inspect or manage local memory.                                                                                                                        |
 | `/doctor`, `/diff`                                    | Run setup diagnostics or show the workspace diff.                                                                                                      |
+| `/queue [clear\|retry]`, `/capy`                      | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                     |
 
 Unknown slash commands are rejected locally and are never sent to the model. One-shot prompts and piped standard input remain script-friendly and do not start the workspace.
 
@@ -203,10 +205,11 @@ The default invocation accepts `[prompt...]`: with words it runs them as one pro
 
 ## Providers
 
-A preset supplies only a base URL and an API-key environment-variable name. Before a chat request Kyokao asks the selected endpoint for `/models` and refuses unavailable IDs; use `--skip-model-check` only for an endpoint that intentionally does not expose model discovery. `kyokao catalog` shows local capability and pricing metadata, while `kyokao -p <preset> models` shows the endpoint’s live IDs.
+OpenAI-compatible presets supply a base URL and API-key environment-variable name. The `capy` preset instead uses Capy's native models, projects, threads, messages, and stop endpoints.
 
 | Preset       | Base URL                                | API-key environment variable | Example model string                      |
 | ------------ | --------------------------------------- | ---------------------------- | ----------------------------------------- |
+| `capy`       | `https://capy.ai/api/v1`                | `CAPY_API_KEY`               | dynamically discovered Captain model      |
 | `openai`     | `https://api.openai.com/v1`             | `OPENAI_API_KEY`             | `gpt-4o-mini`                             |
 | `openrouter` | `https://openrouter.ai/api/v1`          | `OPENROUTER_API_KEY`         | `openai/gpt-4o-mini`                      |
 | `groq`       | `https://api.groq.com/openai/v1`        | `GROQ_API_KEY`               | `llama-3.3-70b-versatile`                 |
@@ -223,6 +226,12 @@ A preset supplies only a base URL and an API-key environment-variable name. Befo
 | `vllm`       | `http://localhost:8000/v1`              | `VLLM_API_KEY`               | served model ID                           |
 
 The example strings are passed through unchanged; they are not a claim that a provider currently serves them.
+
+### Capy remote-agent mode
+
+Run `kyokao config setup`, select `capy`, then choose a dynamically fetched Captain-eligible model and accessible project. The saved `projectId` maps work to that project's connected repositories. The first prompt creates a Capy thread; later prompts and `/resume` continue that thread. `doctor` validates token, model, and project access without starting paid work.
+
+Capy mode does **not** inspect or modify uncommitted files in the directory where Kyokao is launched. It operates on the selected Capy project's connected repositories inside Capy-managed remote VMs. Use `/capy` for run state, waiting/blocking reasons, tasks, and PR links.
 
 ### Provider command examples
 
@@ -288,7 +297,7 @@ Use `kyokao config path` to print the active platform global path. The applicati
 
 ### Schema and examples
 
-The supported top-level keys are `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. `approval` must be `suggest`, `auto-edit`, or `full-auto`; `maxIterations` must be an integer from 1 to 100. `contextWindow` must be at least 1000, and `compressionThreshold` must be between 0 and 1. Provider entries can override `baseURL`, `apiKey`, `model`, `temperature`, `maxTokens`, `topP`, and `fallbackModels`. Alias values and plugin paths are strings.
+The supported top-level keys are `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. Provider entries can also contain Capy's required `projectId`.
 
 A project configuration without secrets:
 
@@ -464,8 +473,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.3.2
-git push origin v0.3.2
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -475,7 +484,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.3.2.tgz
+TARBALL=kyokao-0.4.0.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -487,7 +496,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.3.2.tgz'
+$tarball = '.\kyokao-0.4.0.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help
@@ -496,15 +505,15 @@ Remove-Item -Recurse -Force $prefix
 
 ## Architecture
 
-| Package             | Responsibility                                                                                               |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `@kyokao/config`    | Defaults, JSON validation/loading/merging, provider presets, redaction, and atomic config writes.            |
-| `@kyokao/providers` | OpenAI SDK-compatible chat/model client, usage accounting, model catalog, and wire mapping.                  |
-| `@kyokao/tools`     | Workspace sandbox, core tools, plugins, MCP stdio clients, and tool composition.                             |
-| `@kyokao/memory`    | Local session, usage, context-summary, and manual-memory JSON persistence.                                   |
-| `@kyokao/agent`     | System prompt, retries, context compression, token/cost accounting, bounded tool-call loop, and checkpoints. |
-| `@kyokao/ui`        | Colored output, syntax highlighting, approval prompts, and full-screen terminal rendering.                   |
-| `kyokao`            | Commander CLI wiring, commands, and runtime construction.                                                    |
+| Package             | Responsibility                                                                                    |
+| ------------------- | ------------------------------------------------------------------------------------------------- |
+| `@kyokao/config`    | Defaults, JSON validation/loading/merging, provider presets, redaction, and atomic config writes. |
+| `@kyokao/providers` | OpenAI-compatible chat client plus the independently typed native Capy API client.                |
+| `@kyokao/tools`     | Workspace sandbox, core tools, plugins, MCP stdio clients, and tool composition.                  |
+| `@kyokao/memory`    | Local session, usage, context-summary, and manual-memory JSON persistence.                        |
+| `@kyokao/agent`     | Local/Capy backends, prompt scheduler, context compression, bounded tool loop, and checkpoints.   |
+| `@kyokao/ui`        | Colored output, syntax highlighting, approval prompts, and full-screen terminal rendering.        |
+| `kyokao`            | Commander CLI wiring, commands, and runtime construction.                                         |
 
 For an agent run, the CLI resolves configuration and provider settings, validates the selected model against `/models`, starts configured plugins and MCP servers, creates a workspace sandbox and local store, then sends a system prompt, compacted transcript, and user prompt to the provider. The provider response may stream text and function calls. For each returned call, the agent executes the matching core, plugin, or MCP tool, appends a tool-result message, records usage, saves a checkpoint, and calls the provider again. It stops when no tool calls remain or errors after the configured iteration limit. Transient provider failures are retried up to two times with short exponential backoff; aborts and messages matching certain client/configuration error patterns are not retried.
 

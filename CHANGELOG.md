@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Added a production prompt scheduler: the composer remains editable during work, Enter replaces the active turn, Ctrl-Enter queues FIFO follow-ups, and `/queue` exposes retryable pending work.
+- Added native Capy remote-agent support with dynamic Captain model/project setup, remote thread continuation and resume, bounded polling, cancellation, status, task, and PR reporting.
+- Added Shift-Enter keyboard protocol support, atomic interrupted-session/queue checkpoints, backend lifecycle isolation, and race/fake-server/PTY coverage.
+
 ## 0.3.2
 
 - Moved interactive session resume guidance out of the transcript and into the restored shell after exit.
