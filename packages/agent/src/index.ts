@@ -23,7 +23,7 @@ export interface AgentOptions {
   maxToolCalls?: number;
   maxCostUsd?: number;
   maxOutputChars?: number;
-  onEvent?: (kind: 'text' | 'tool' | 'assistant' | 'usage', text: string) => void;
+  onEvent?: (kind: 'text' | 'tool' | 'tool-result' | 'assistant' | 'usage', text: string) => void;
   signal?: AbortSignal;
 }
 
@@ -228,6 +228,10 @@ export class Agent {
           name: call.name,
           content,
         };
+        this.options.onEvent?.(
+          'tool-result',
+          `${call.name}: ${result.isError ? 'failed' : 'completed'}\n${content}`,
+        );
         fullMessages.push(toolMessage);
         s.messages.push(toolMessage);
       }
