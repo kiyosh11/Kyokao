@@ -222,7 +222,7 @@ describe('prompt scheduler', () => {
   });
 });
 
-async function capyServer() {
+async function capyServer(options: { autoReady?: boolean } = {}) {
   const requests: Array<{ method: string; url: string; body: any; authorization?: string }> = [];
   let threadState = 'running';
   let polls = 0;
@@ -300,7 +300,8 @@ async function capyServer() {
         }),
       );
     if (request.url === '/v1/threads/jam-1') {
-      if (threadState === 'running' && ++polls >= 2) threadState = 'ready';
+      if (options.autoReady !== false && threadState === 'running' && ++polls >= 2)
+        threadState = 'ready';
       return response.end(JSON.stringify(thread(threadState)));
     }
     response.statusCode = 404;
@@ -516,7 +517,7 @@ describe('Capy API and remote backend', () => {
   });
 
   it('stops a remote thread on cancellation without leaking the token', async () => {
-    const fake = await capyServer();
+    const fake = await capyServer({ autoReady: false });
     const client = new CapyClient({ baseURL: fake.baseURL, apiKey: 'never-render-me' });
     const root = await mkdtemp(join(tmpdir(), 'kyokao-capy-stop-'));
     const backend = new CapyRemoteBackend({
