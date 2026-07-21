@@ -78,6 +78,28 @@ describe('configuration', () => {
     expect(config.temperature).toBe(0.2);
     expect(config.limits.maxToolCalls).toBe(4);
   });
+  it('requires and resolves a Capy project binding separately from OpenAI settings', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-capy-config-'));
+    await writeFile(
+      join(dir, '.kyokao.json'),
+      JSON.stringify({
+        provider: 'capy',
+        model: 'captain-model',
+        providers: { capy: { projectId: 'project-1' } },
+      }),
+    );
+    const config = await loadConfig({
+      cwd: dir,
+      env: { ...process.env, CAPY_API_KEY: 'capy-token' },
+    });
+    expect(config.providers.capy?.projectId).toBe('project-1');
+    const invalid = await mkdtemp(join(tmpdir(), 'kyokao-capy-invalid-'));
+    await writeFile(
+      join(invalid, '.kyokao.json'),
+      JSON.stringify({ provider: 'capy', model: 'captain-model' }),
+    );
+    await expect(loadConfig({ cwd: invalid })).rejects.toThrow('projectId');
+  });
 });
 describe('sandbox and tools', () => {
   it('allows deeply nested creation and returns shell failures', async () => {

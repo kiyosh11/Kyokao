@@ -17,6 +17,14 @@ export interface Session {
   checkpoint?: string;
   usage?: SessionUsage;
   contextSummary?: string;
+  provider?: string;
+  pendingPrompts?: string[];
+  remote?: {
+    provider: 'capy';
+    projectId: string;
+    threadId: string;
+    runState?: string;
+  };
 }
 async function atomicWrite(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

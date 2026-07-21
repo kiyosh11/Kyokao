@@ -93,6 +93,9 @@ importers:
 
   packages/ui:
     dependencies:
+      '@kyokao/agent':
+        specifier: workspace:*
+        version: link:../agent
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1

@@ -246,3 +246,6 @@ export class Agent {
     throw new Error(`Agent reached iteration limit (${this.options.maxIterations})`);
   }
 }
+
+export * from './backends.js';
+export * from './scheduler.js';

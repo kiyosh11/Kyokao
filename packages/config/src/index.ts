@@ -16,6 +16,7 @@ export interface ProviderConfig {
   maxTokens?: number;
   topP?: number;
   fallbackModels?: string[];
+  projectId?: string;
 }
 export interface SafetyLimits {
   maxToolCalls: number;
@@ -69,7 +70,12 @@ export const defaults: KyokaoConfig = {
     allowedHosts: [],
   },
 };
-export const providerPresets: Record<string, { baseURL: string; env: string }> = {
+export const providerPresets: Record<string, { baseURL: string; env: string; remote?: boolean }> = {
+  capy: {
+    baseURL: 'https://capy.ai/api/v1',
+    env: 'CAPY_API_KEY',
+    remote: true,
+  },
   openai: { baseURL: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY' },
   openrouter: { baseURL: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY' },
   groq: { baseURL: 'https://api.groq.com/openai/v1', env: 'GROQ_API_KEY' },
@@ -201,7 +207,7 @@ function validateConfig(value: unknown): asserts value is Partial<KyokaoConfig> 
     if (!provider || typeof provider !== 'object' || Array.isArray(provider))
       throw new Error(`provider ${name} must be an object`);
     for (const [key, v] of Object.entries(provider as Record<string, unknown>)) {
-      if (['apiKey', 'baseURL', 'model'].includes(key) && typeof v !== 'string')
+      if (['apiKey', 'baseURL', 'model', 'projectId'].includes(key) && typeof v !== 'string')
         throw new Error(`provider ${name}.${key} must be a string`);
       if (['temperature', 'topP'].includes(key) && typeof v !== 'number')
         throw new Error(`provider ${name}.${key} must be a number`);
@@ -221,6 +227,7 @@ function validateConfig(value: unknown): asserts value is Partial<KyokaoConfig> 
           'topP',
           'maxTokens',
           'fallbackModels',
+          'projectId',
         ].includes(key)
       )
         throw new Error(`provider ${name}.${key} is not supported`);
@@ -296,6 +303,13 @@ export async function loadConfig(
   result = merge(result, opts.cli ?? {}) as KyokaoConfig;
   if (!providerPresets[result.provider] && !result.providers[result.provider])
     throw new Error(`Unknown provider: ${result.provider}`);
+  if (
+    result.provider === 'capy' &&
+    (!result.providers.capy?.projectId || typeof result.providers.capy.projectId !== 'string')
+  )
+    throw new Error(
+      'Capy provider requires providers.capy.projectId. Run "kyokao config setup" to select an accessible project.',
+    );
   if (!['suggest', 'auto-edit', 'full-auto'].includes(result.approval))
     throw new Error('approval must be suggest, auto-edit, or full-auto');
   if (
@@ -358,6 +372,7 @@ export interface ProviderSetupInput {
   baseURL?: string;
   presetBaseURL?: string;
   apiKey?: string;
+  projectId?: string;
 }
 export function mergeProviderSetup(
   saved: Partial<KyokaoConfig>,
@@ -367,6 +382,7 @@ export function mergeProviderSetup(
   if (setup.presetBaseURL && setup.baseURL === setup.presetBaseURL) delete current.baseURL;
   else if (setup.baseURL) current.baseURL = setup.baseURL;
   if (setup.apiKey) current.apiKey = setup.apiKey;
+  if (setup.projectId) current.projectId = setup.projectId;
   const providers = { ...(saved.providers ?? {}) };
   if (Object.keys(current).length) providers[setup.provider] = current;
   else delete providers[setup.provider];

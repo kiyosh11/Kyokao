@@ -1,7 +1,7 @@
 {
   "name": "kyokao",
-  "version": "0.3.2",
-  "description": "A safe, local-first coding agent",
+  "version": "0.4.0",
+  "description": "A safe local and Capy remote coding agent",
   "type": "module",
   "bin": {
     "kyokao": "./dist/kyokao.cjs"

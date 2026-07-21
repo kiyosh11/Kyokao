@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+export * from './capy.js';
 
 export interface ToolCall {
   id: string;

@@ -78,6 +78,7 @@ export type EditorKey =
   | 'alt-right'
   | 'enter'
   | 'newline'
+  | 'queue'
   | 'tab'
   | 'escape'
   | 'page-up'
@@ -90,6 +91,26 @@ export type InputEvent =
   | { type: 'paste'; text: string };
 
 const sequences: Array<[string, EditorKey]> = [
+  ['\x1b[27;2;13~', 'newline'],
+  ['\x1b[27;3;13~', 'newline'],
+  ['\x1b[27;5;13~', 'queue'],
+  ['\x1b[13;2u', 'newline'],
+  ['\x1b[13;3u', 'newline'],
+  ['\x1b[13;5u', 'queue'],
+  ['\x1b[27;5;97~', 'ctrl-a'],
+  ['\x1b[27;5;99~', 'interrupt'],
+  ['\x1b[27;5;101~', 'ctrl-e'],
+  ['\x1b[27;5;106~', 'queue'],
+  ['\x1b[27;5;107~', 'ctrl-k'],
+  ['\x1b[27;5;117~', 'ctrl-u'],
+  ['\x1b[27;5;119~', 'ctrl-w'],
+  ['\x1b[97;5u', 'ctrl-a'],
+  ['\x1b[99;5u', 'interrupt'],
+  ['\x1b[101;5u', 'ctrl-e'],
+  ['\x1b[106;5u', 'queue'],
+  ['\x1b[107;5u', 'ctrl-k'],
+  ['\x1b[117;5u', 'ctrl-u'],
+  ['\x1b[119;5u', 'ctrl-w'],
   ['\x1b[1;3D', 'alt-left'],
   ['\x1b[1;3C', 'alt-right'],
   ['\x1b[3~', 'delete'],
@@ -163,7 +184,7 @@ export class TerminalInputParser {
         character === '\r'
           ? 'enter'
           : character === '\n'
-            ? 'newline'
+            ? 'queue'
             : character === '\x7f' || character === '\b'
               ? 'backspace'
               : character === '\t'
