@@ -10,6 +10,7 @@ import {
   mergeProviderSetup,
   readConfig,
   redact,
+  saveProviderSelection,
 } from '@kyokao/config';
 import {
   WorkspaceSandbox,
@@ -589,6 +590,31 @@ describe('setup config persistence', () => {
     expect(restored.plugins).toEqual(existing.plugins);
     expect(restored.mcp).toEqual(existing.mcp);
     expect(restored.providers?.old?.apiKey).toBe('keep-me');
+  });
+
+  it('saves a provider token without overwriting unrelated or endpoint settings', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-provider-token-'));
+    const path = join(dir, 'config.json');
+    await atomicWrite(path, {
+      theme: 'nord',
+      providers: {
+        custom: { baseURL: 'https://provider.test/v1', apiKey: 'old-token' },
+        retained: { baseURL: 'http://localhost:1234/v1' },
+      },
+    });
+    await saveProviderSelection('custom', { apiKey: 'new-token', model: 'provider-model' }, path);
+    const saved = await readConfig(path);
+    expect(saved).toMatchObject({
+      theme: 'nord',
+      provider: 'custom',
+      model: 'provider-model',
+      providers: {
+        custom: { baseURL: 'https://provider.test/v1', apiKey: 'new-token' },
+        retained: { baseURL: 'http://localhost:1234/v1' },
+      },
+    });
+    await saveProviderSelection('custom', {}, path);
+    expect((await readConfig(path)).providers?.custom?.apiKey).toBe('new-token');
   });
 });
 

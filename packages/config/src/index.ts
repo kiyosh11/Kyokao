@@ -409,6 +409,28 @@ export async function saveGlobalThemes(
   await atomicWrite(path, { ...saved, theme, codeTheme });
 }
 
+export async function saveProviderSelection(
+  provider: string,
+  options: { apiKey?: string; model?: string } = {},
+  path = globalConfigPath(),
+): Promise<void> {
+  const saved = await readConfig(path);
+  const current = saved.providers?.[provider] ?? {};
+  const apiKey = options.apiKey?.trim();
+  await atomicWrite(path, {
+    ...saved,
+    provider,
+    ...(options.model ? { model: options.model } : {}),
+    providers: {
+      ...saved.providers,
+      [provider]: {
+        ...current,
+        ...(apiKey ? { apiKey } : {}),
+      },
+    },
+  });
+}
+
 export interface ProviderSetupInput {
   provider: string;
   model: string;

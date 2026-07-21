@@ -64,6 +64,7 @@ export type WorkspaceCommand =
 export interface CommandDefinition {
   name: WorkspaceCommand;
   syntax: string;
+  label?: string;
   description: string;
   completion?: string;
   submit?: boolean;
@@ -359,6 +360,7 @@ export interface WorkspaceControl {
   reset: () => Promise<void>;
   cancelActive: () => Promise<void>;
   enqueue: (prompt: string) => Promise<void>;
+  promptSecret: (label: string) => Promise<string | undefined>;
 }
 
 export interface WorkspaceRenderState {
@@ -377,6 +379,7 @@ export interface WorkspaceRenderState {
   scheduler?: SchedulerState;
   themeContext?: ThemeContext;
   paletteCommands?: CommandDefinition[];
+  secretLabel?: string;
 }
 
 function border(width: number, left: string, right: string, label = ''): string {
@@ -451,21 +454,23 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   const headerGap = ' '.repeat(
     Math.max(1, inner - displayWidth(fittedTitle) - displayWidth(fittedMeta)),
   );
-  const status = state.approval
-    ? `${state.approval.action}: ${state.approval.detail} [y/N]`
-    : state.scheduler?.phase === 'stopping'
-      ? 'Stopping…'
-      : state.scheduler?.phase === 'starting-replacement'
-        ? 'Starting replacement…'
-        : state.scheduler?.phase === 'failed'
-          ? 'Queue paused after error · /queue retry'
-          : state.busy
-            ? state.busyKind === 'command'
-              ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
-              : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
-            : scrollOffset
-              ? `Viewing earlier output (${scrollOffset} lines) · End returns`
-              : 'Ready';
+  const status = state.secretLabel
+    ? `${state.secretLabel} · Enter save · Esc cancel`
+    : state.approval
+      ? `${state.approval.action}: ${state.approval.detail} [y/N]`
+      : state.scheduler?.phase === 'stopping'
+        ? 'Stopping…'
+        : state.scheduler?.phase === 'starting-replacement'
+          ? 'Starting replacement…'
+          : state.scheduler?.phase === 'failed'
+            ? 'Queue paused after error · /queue retry'
+            : state.busy
+              ? state.busyKind === 'command'
+                ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
+                : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
+              : scrollOffset
+                ? `Viewing earlier output (${scrollOffset} lines) · End returns`
+                : 'Ready';
   const lines = [
     context.tui('border', border(width, '╭', '╮')),
     `│${context.tui('brand', fittedTitle)}${headerGap}${context.tui('muted', fittedMeta)}│`,
@@ -492,11 +497,12 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
     for (const [index, item] of paletteWindow.commands.entries()) {
       const absoluteIndex = paletteWindow.start + index;
       const marker = absoluteIndex === paletteIndex ? '›' : ' ';
+      const itemLabel = item.label ?? item.syntax;
       const syntaxWidth = Math.min(
-        Math.max(4, displayWidth(item.syntax)),
+        Math.max(4, displayWidth(itemLabel)),
         Math.max(4, Math.floor((inner - 4) * 0.45)),
       );
-      const syntax = padDisplay(item.syntax, syntaxWidth);
+      const syntax = padDisplay(itemLabel, syntaxWidth);
       const row = framed(
         `${marker} ${syntax} ${truncateDisplay(item.description, inner - syntaxWidth - 4)}`,
         width,
@@ -514,11 +520,12 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
         ),
       );
   }
-  const statusToken = state.approval
-    ? 'warning'
-    : state.scheduler?.phase === 'failed'
-      ? 'error'
-      : 'status';
+  const statusToken =
+    state.approval || state.secretLabel
+      ? 'warning'
+      : state.scheduler?.phase === 'failed'
+        ? 'error'
+        : 'status';
   lines.push(context.tui(statusToken, border(width, '├', '┤', status)));
   for (const row of visibleComposer) lines.push(context.tui('inputAccent', framed(row, width)));
   lines.push(context.tui('border', border(width, '╰', '╯')));
@@ -537,7 +544,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   if (lines.length > height) lines.splice(3, lines.length - height);
   const composerTop = 3 + transcriptHeight + paletteBlock + queueRows + 1;
   const cursor =
-    state.busyKind === 'command' || state.approval
+    (state.busyKind === 'command' && !state.secretLabel) || state.approval
       ? undefined
       : {
           row: composerTop + editorLayout.cursor.row - composerStart,
@@ -592,6 +599,7 @@ async function runTerminalWorkspace(
   const context =
     options.themeContext ?? createThemeContext({ isTTY: output.isTTY, env: process.env });
   const editor = new EditorState();
+  const secretEditor = new EditorState();
   const history = new PromptHistory();
   const parser = new TerminalInputParser();
   let busy = false;
@@ -600,6 +608,7 @@ async function runTerminalWorkspace(
   let paletteIndex = 0;
   let closed = false;
   let approval: { action: string; detail: string; resolve: (allowed: boolean) => void } | undefined;
+  let secretPrompt: { label: string; resolve: (value: string | undefined) => void } | undefined;
   let transcript: TranscriptEntry[] = [];
   let usage: WorkspaceUsage | undefined;
   let schedulerState: SchedulerState = { phase: 'idle', queue: [] };
@@ -662,15 +671,26 @@ async function runTerminalWorkspace(
     reset: () => scheduler.reset(),
     cancelActive: () => scheduler.cancelActive(),
     enqueue: (prompt) => scheduler.submit(prompt, 'queue'),
+    promptSecret: (label) =>
+      new Promise<string | undefined>((resolve) => {
+        if (secretPrompt) throw new Error('A secure input prompt is already active');
+        secretEditor.set('');
+        secretPrompt = { label, resolve };
+        draw();
+      }),
   };
   const palette = () =>
-    editor.text.startsWith('/') && busyKind !== 'command'
+    !secretPrompt && editor.text.startsWith('/') && busyKind !== 'command'
       ? (options.commandPalette?.(editor.text) ?? filterWorkspaceCommands(editor.text, context))
       : [];
   const draw = () => {
     if (closed) return;
     const matches = palette();
     paletteIndex = selectPalette(paletteIndex, 0, matches.length);
+    const displayedEditor = secretPrompt
+      ? new EditorState('•'.repeat(graphemes(secretEditor.text).length))
+      : editor;
+    if (secretPrompt) displayedEditor.cursor = secretEditor.cursor;
     const rendered = renderTranscript(transcript, output.columns ?? 80, context);
     const requestedScrollOffset = scrollOffset;
     let frame = renderWorkspaceScreen({
@@ -678,7 +698,7 @@ async function runTerminalWorkspace(
       height: output.rows ?? 24,
       header: options.header(),
       transcript,
-      editor,
+      editor: displayedEditor,
       busy,
       busyKind,
       approval,
@@ -689,6 +709,7 @@ async function runTerminalWorkspace(
       scheduler: schedulerState,
       themeContext: context,
       paletteCommands: matches,
+      secretLabel: secretPrompt?.label,
     });
     const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -698,7 +719,7 @@ async function runTerminalWorkspace(
         height: output.rows ?? 24,
         header: options.header(),
         transcript,
-        editor,
+        editor: displayedEditor,
         busy,
         busyKind,
         approval,
@@ -709,6 +730,7 @@ async function runTerminalWorkspace(
         scheduler: schedulerState,
         themeContext: context,
         paletteCommands: matches,
+        secretLabel: secretPrompt?.label,
       });
     screen.draw(frame);
   };
@@ -723,6 +745,13 @@ async function runTerminalWorkspace(
     approval.resolve(allowed);
     approval = undefined;
     if (message) transcript.push({ kind: 'status', text: message });
+  };
+  const settleSecret = (value?: string) => {
+    if (!secretPrompt) return;
+    const { resolve } = secretPrompt;
+    secretPrompt = undefined;
+    secretEditor.set('');
+    resolve(value);
   };
   const runPrompt = async (prompt: string, mode: 'replace' | 'queue') => {
     await scheduler.submit(prompt, mode);
@@ -774,6 +803,31 @@ async function runTerminalWorkspace(
           )
             settleApproval(false, 'Approval denied.');
           else return;
+          draw();
+          return;
+        }
+        if (secretPrompt) {
+          if (event.type === 'paste') secretEditor.insert(event.text.replace(/\r?\n/g, ''));
+          else if (event.type === 'text') secretEditor.insert(event.text);
+          else if (event.key === 'enter') {
+            settleSecret(secretEditor.text.trim());
+            draw();
+            return;
+          } else if (event.key === 'escape' || event.key === 'interrupt') {
+            settleSecret();
+            draw();
+            return;
+          } else if (event.key === 'backspace') secretEditor.backspace();
+          else if (event.key === 'delete') secretEditor.delete();
+          else if (event.key === 'left') secretEditor.left();
+          else if (event.key === 'right') secretEditor.right();
+          else if (event.key === 'home' || event.key === 'ctrl-a') secretEditor.start();
+          else if (event.key === 'end' || event.key === 'ctrl-e') secretEditor.finish();
+          else if (event.key === 'ctrl-u') secretEditor.killBefore();
+          else if (event.key === 'ctrl-k') secretEditor.killAfter();
+          else if (event.key === 'ctrl-w') secretEditor.deleteWordBefore();
+          else if (event.key === 'alt-left') secretEditor.wordLeft();
+          else if (event.key === 'alt-right') secretEditor.wordRight();
           draw();
           return;
         }
@@ -902,6 +956,7 @@ async function runTerminalWorkspace(
     if (escapeTimer) clearTimeout(escapeTimer);
     clearInterval(ticker);
     settleApproval(false);
+    settleSecret();
     await scheduler.close();
     if (dataListener) input.removeListener('data', dataListener);
     if (streamFinish) {
