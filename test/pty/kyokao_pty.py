@@ -40,7 +40,7 @@ class FakeProvider(BaseHTTPRequestHandler):
         FakeProvider.requests.append(request)
         users = [message["content"] for message in request.get("messages", []) if message["role"] == "user"]
         prompt = users[-1] if users else ""
-        if prompt == "first delayed":
+        if prompt in {"first delayed", "escape delayed"}:
             time.sleep(5)
         content = (
             f"response:{prompt}"
@@ -200,9 +200,10 @@ def run(binary):
 
         mark = len(shell.output)
         shell.send("/provider ollama\r")
-        shell.wait("API token for ollama", mark)
-        shell.send("\r")
-        shell.wait("Provider ollama is already active; credentials unchanged.", mark)
+        shell.wait("Provider ollama is already active; configuration unchanged.", mark)
+        time.sleep(0.05)
+        shell.read()
+        assert "API token for ollama" not in shell.output[mark:]
 
         checks = [
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
@@ -279,8 +280,7 @@ def run(binary):
         assert not re.search(
             r"(?m)^│\s*(?:You|Kyokao)\s*│$", latest_frame
         ), "user or assistant transcript label was rendered"
-        ready_after_response = len(shell.output)
-        shell.wait("Ready", ready_after_response)
+        shell.wait("Ready", mark)
         provider_mark = len(shell.output)
         shell.send("/provider")
         shell.wait("Providers", provider_mark)
@@ -296,6 +296,12 @@ def run(binary):
         time.sleep(0.05)
         provider_mark = len(shell.output)
         shell.send("/provider pty\r")
+        shell.wait("Provider pty is already active; saved credentials reused.", provider_mark)
+        time.sleep(0.05)
+        shell.read()
+        assert "API token for pty" not in shell.output[provider_mark:]
+        provider_mark = len(shell.output)
+        shell.send("/provider key\r")
         shell.wait("API token for pty", provider_mark)
         shell.send("rotated-test-key")
         time.sleep(0.05)
@@ -398,15 +404,35 @@ def run(binary):
         assert scheduled == ["first delayed", "replacement", "queued", "line one\nline two"], scheduled
         assert "respond deterministically" in request_users[-1], "approval change lost session context"
         assert request_users[-1][-4:] == ["first delayed", "replacement", "queued", "line one\nline two"]
+        time.sleep(0.1)
+        shell.read()
+        cancel_mark = len(shell.output)
+        shell.send("escape delayed\r")
+        shell.wait("Working", cancel_mark)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if any(
+                any(
+                    message.get("role") == "user" and message.get("content") == "escape delayed"
+                    for message in request.get("messages", [])
+                )
+                for request in FakeProvider.requests
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("escape cancellation request did not start")
+        shell.send("\x1b")
+        shell.wait("Request cancelled.", cancel_mark)
+        shell.wait("Ready", cancel_mark)
         with open(config_path, encoding="utf-8") as config_file:
             saved_theme_config = json.load(config_file)
         assert saved_theme_config["theme"] == "solarized-light"
         assert saved_theme_config["codeTheme"] == "github-light"
         assert saved_theme_config["providers"]["pty"]["apiKey"] == "rotated-test-key"
-        ready_mark = len(shell.output)
-        shell.wait("Ready", ready_mark)
-        shell.send("/exit\r")
-        shell.wait(PROMPT, mark)
+        exit_mark = len(shell.output)
+        shell.send("\x03")
+        shell.wait(PROMPT, exit_mark)
         interactive = shell.output[start:]
         assert_restored(interactive)
         exit_tail = interactive.rsplit(ALT_LEAVE, 1)[1]

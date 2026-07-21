@@ -61,7 +61,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: local and Capy remote coding agents')
-  .version('0.5.3')
+  .version('0.5.4')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -621,7 +621,14 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
             }));
         }
         return (
-          choicePalette(value, 'provider', providers) ??
+          choicePalette(value, 'provider', [
+            ...providers,
+            {
+              value: 'key',
+              label: 'Change API key…',
+              description: `replace the saved key for ${r.config.provider}`,
+            },
+          ]) ??
           choicePalette(value, 'model', models) ??
           choicePalette(value, 'approval', [
             {
@@ -853,10 +860,18 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 },
               ],
             };
-          const preset = providerPresets[arg];
-          const configured = r.config.providers[arg];
+          if (command.args.length !== 1)
+            return {
+              messages: [{ kind: 'error', text: 'Usage: /provider [name|key]' }],
+            };
+          const updateCredentials = arg === 'key';
+          const providerName = updateCredentials ? r.config.provider : arg;
+          const preset = providerPresets[providerName];
+          const configured = r.config.providers[providerName];
           if (!preset && !configured)
-            return { messages: [{ kind: 'error', text: `Unknown provider: ${arg}` }] };
+            return {
+              messages: [{ kind: 'error', text: `Unknown provider: ${providerName}` }],
+            };
           const scheduler = control.scheduler();
           if (
             scheduler.active ||
@@ -871,33 +886,61 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 },
               ],
             };
-          const apiKey = await control.promptSecret(`API token for ${arg}`);
-          if (apiKey === undefined)
-            return { messages: [{ kind: 'status', text: 'Provider selection cancelled.' }] };
-          const local = ['ollama', 'lmstudio', 'vllm'].includes(arg);
+          const local = ['ollama', 'lmstudio', 'vllm'].includes(providerName);
           const existingApiKey =
             configured?.apiKey ?? (preset ? process.env[preset.env] : undefined);
+          const sameProvider = providerName === r.config.provider;
+          if (sameProvider && !updateCredentials && (existingApiKey || local || !preset))
+            return {
+              messages: [
+                {
+                  text: existingApiKey
+                    ? `Provider ${providerName} is already active; saved credentials reused.`
+                    : `Provider ${providerName} is already active; configuration unchanged.`,
+                },
+              ],
+            };
+          let apiKey: string | undefined;
+          if (updateCredentials || (!existingApiKey && preset && !local)) {
+            apiKey = await control.promptSecret(`API token for ${providerName}`);
+            if (apiKey === undefined)
+              return {
+                messages: [
+                  {
+                    kind: 'status',
+                    text: updateCredentials
+                      ? 'Credential update cancelled.'
+                      : 'Provider selection cancelled.',
+                  },
+                ],
+              };
+          }
+          if (updateCredentials && !apiKey)
+            return {
+              messages: [
+                { kind: 'error', text: 'Enter a non-empty API token to replace the key.' },
+              ],
+            };
           if (!apiKey && !existingApiKey && preset && !local)
             return {
               messages: [
                 {
                   kind: 'error',
-                  text: `An API token is required for ${arg}. Select it again or configure ${preset.env}.`,
+                  text: `An API token is required for ${providerName}. Select it again or configure ${preset.env}.`,
                 },
               ],
             };
           const providers = apiKey
             ? {
                 ...r.config.providers,
-                [arg]: { ...configured, apiKey },
+                [providerName]: { ...configured, apiKey },
               }
             : r.config.providers;
-          const sameProvider = arg === r.config.provider;
           try {
             const providerModel = configured?.model;
             await replaceRuntime(
               {
-                provider: arg,
+                provider: providerName,
                 providers,
                 ...(providerModel ? { model: providerModel } : {}),
               },
@@ -905,7 +948,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 ? { preserveCompatibleSession: true }
                 : { beforeSwap: () => control.reset() },
             );
-            await saveProviderSelection(arg, {
+            await saveProviderSelection(providerName, {
               ...(apiKey ? { apiKey } : {}),
               ...(providerModel ? { model: providerModel } : {}),
             });
@@ -922,8 +965,8 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
               {
                 text: sameProvider
                   ? apiKey
-                    ? `Credentials updated for ${arg}; session context was preserved.`
-                    : `Provider ${arg} is already active; credentials unchanged.`
+                    ? `Credentials updated for ${providerName}; session context was preserved.`
+                    : `Provider ${providerName} is already active; saved credentials reused.`
                   : `Active provider changed to ${r.config.provider}; incompatible context was reset.`,
               },
             ],

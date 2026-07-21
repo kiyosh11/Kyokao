@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4
+
+- Reused saved or environment provider credentials when selecting providers; API-token entry now opens only when credentials are missing or the explicit `/provider key` action is selected.
+- Made Escape cancel an active model request while Ctrl-C exits the interactive workspace.
+
 ## 0.5.3
 
 - Added composer pickers for command help, live provider models, resumable sessions, and memory deletion; refreshed session/model choices as runtime state changes and tightened invalid memory/queue command handling.
