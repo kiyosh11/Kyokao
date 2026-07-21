@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -45,6 +45,18 @@ async function fakeServer(handler: (body: any, call: number) => string) {
   const address = server.address();
   return `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
 }
+
+it('replaces existing session files repeatedly without leaving temporary files', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kyokao-session-replace-'));
+  const store = new LocalStore(join(dir, '.kyokao'));
+  const session = await store.create('initial');
+  for (let index = 0; index < 10; index++) {
+    session.task = `save ${index}`;
+    await store.saveSession(session);
+  }
+  expect((await store.loadSession(session.id)).task).toBe('save 9');
+  expect(await readdir(join(dir, '.kyokao', 'sessions'))).toEqual([`${session.id}.json`]);
+});
 describe('configuration', () => {
   it('uses profile before environment and redacts nested secrets', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));

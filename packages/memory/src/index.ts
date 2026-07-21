@@ -1,6 +1,7 @@
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { ChatMessage } from '@kyokao/providers';
 import type { TokenUsage } from '@kyokao/providers';
 export interface SessionUsage extends TokenUsage {
@@ -29,8 +30,30 @@ export interface Session {
 async function atomicWrite(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+    try {
+      await rename(tmp, path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!['EACCES', 'EEXIST', 'ENOTEMPTY', 'EPERM'].includes(code ?? '')) throw error;
+      let lastError: unknown = error;
+      for (const delay of [0, 25, 75, 150, 300]) {
+        if (delay) await sleep(delay);
+        try {
+          await copyFile(tmp, path);
+          return;
+        } catch (copyError) {
+          lastError = copyError;
+          const copyCode = (copyError as NodeJS.ErrnoException).code;
+          if (!['EACCES', 'EBUSY', 'EPERM'].includes(copyCode ?? '')) throw copyError;
+        }
+      }
+      throw lastError;
+    }
+  } finally {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
 }
 function safeId(id: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(id)) throw new Error('Invalid session id');

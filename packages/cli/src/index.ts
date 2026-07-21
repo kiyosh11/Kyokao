@@ -61,7 +61,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: local and Capy remote coding agents')
-  .version('0.5.4')
+  .version('0.5.5')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')

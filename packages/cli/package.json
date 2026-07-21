@@ -1,6 +1,6 @@
 {
   "name": "kyokao",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "A safe local and Capy remote coding agent",
   "repository": {
     "type": "git",

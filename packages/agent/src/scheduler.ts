@@ -198,7 +198,14 @@ export class PromptScheduler {
   }
 
   private async changed(): Promise<void> {
-    await this.options.onQueueChange?.(this.pending());
+    try {
+      await this.options.onQueueChange?.(this.pending());
+    } catch (error) {
+      this.options.emit(
+        'error',
+        `Unable to save queued prompts: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     this.notify();
   }
 
