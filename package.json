@@ -34,14 +34,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kiyosh11/maybetest.git"
+    "url": "git+https://github.com/kiyosh11/Kyokao.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/kiyosh11/maybetest/issues"
+    "url": "https://github.com/kiyosh11/Kyokao/issues"
   },
-  "homepage": "https://github.com/kiyosh11/maybetest#readme"
+  "homepage": "https://github.com/kiyosh11/Kyokao#readme"
 }

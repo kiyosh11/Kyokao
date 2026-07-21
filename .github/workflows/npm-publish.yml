@@ -4,9 +4,15 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version to publish from the selected ref
+        required: true
+        type: string
 
 concurrency:
-  group: npm-publish-${{ github.ref_name }}
+  group: npm-publish-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -25,12 +31,26 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
-      - name: Validate release tag
+      - name: Validate release reference
         shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           VERSION="$(node -p "require('./packages/cli/package.json').version")"
-          test "${GITHUB_REF_NAME}" = "v${VERSION}" || {
-            echo "Tag ${GITHUB_REF_NAME} does not match CLI version v${VERSION}" >&2
+          if [[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]]; then
+            test "${REQUESTED_VERSION}" = "${VERSION}" || {
+              echo "Requested version ${REQUESTED_VERSION} does not match CLI version ${VERSION}" >&2
+              exit 1
+            }
+          else
+            test "${GITHUB_REF_NAME}" = "v${VERSION}" || {
+              echo "Tag ${GITHUB_REF_NAME} does not match CLI version v${VERSION}" >&2
+              exit 1
+            }
+          fi
+          REPOSITORY="$(node -p "require('./packages/cli/package.json').repository.url")"
+          test "${REPOSITORY}" = "git+https://github.com/${GITHUB_REPOSITORY}.git" || {
+            echo "CLI repository ${REPOSITORY} does not match provenance repository ${GITHUB_REPOSITORY}" >&2
             exit 1
           }
       - run: pnpm format && pnpm lint && pnpm typecheck && pnpm test && pnpm build
