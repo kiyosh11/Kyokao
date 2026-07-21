@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- Simplified provider drop-up rows to provider names and added masked in-composer API-token entry with atomic credential persistence, cancellation, and session-preserving credential rotation.
+
 ## 0.5.1
 
 - Removed the `You` and `Kyokao` transcript headers while retaining semantic colors, spacing, tool labels, and lossless wrapping.

@@ -13,6 +13,7 @@ import {
   mergeProviderSetup,
   effectiveSetupApiKey,
   saveGlobalThemes,
+  saveProviderSelection,
   type KyokaoConfig,
 } from '@kyokao/config';
 import {
@@ -60,7 +61,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: local and Capy remote coding agents')
-  .version('0.5.1')
+  .version('0.5.2')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -441,6 +442,7 @@ function choicePalette(
   command: CommandDefinition['name'],
   choices: Array<{
     value: string;
+    label?: string;
     description: string;
     completion?: string;
     submit?: boolean;
@@ -454,6 +456,7 @@ function choicePalette(
     .map((choice) => ({
       name: command,
       syntax: `/${command} ${choice.value}`,
+      label: choice.label,
       description: choice.description,
       completion: choice.completion ?? `/${command} ${choice.value}`,
       submit: choice.submit ?? true,
@@ -559,6 +562,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 : 'needs credentials';
             return {
               value: name,
+              label: name,
               description: `${name === r.config.provider ? 'active · ' : ''}${kind} · ${readiness}`,
             };
           });
@@ -773,16 +777,62 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 },
               ],
             };
-          if (arg === r.config.provider)
-            return { messages: [{ text: `Provider ${arg} is already active.` }] };
+          const preset = providerPresets[arg];
+          const configured = r.config.providers[arg];
+          if (!preset && !configured)
+            return { messages: [{ kind: 'error', text: `Unknown provider: ${arg}` }] };
+          const scheduler = control.scheduler();
+          if (
+            scheduler.active ||
+            scheduler.phase === 'stopping' ||
+            scheduler.phase === 'starting-replacement'
+          )
+            return {
+              messages: [
+                {
+                  kind: 'error',
+                  text: 'Wait for or cancel the active request before changing provider credentials.',
+                },
+              ],
+            };
+          const apiKey = await control.promptSecret(`API token for ${arg}`);
+          if (apiKey === undefined)
+            return { messages: [{ kind: 'status', text: 'Provider selection cancelled.' }] };
+          const local = ['ollama', 'lmstudio', 'vllm'].includes(arg);
+          const existingApiKey =
+            configured?.apiKey ?? (preset ? process.env[preset.env] : undefined);
+          if (!apiKey && !existingApiKey && preset && !local)
+            return {
+              messages: [
+                {
+                  kind: 'error',
+                  text: `An API token is required for ${arg}. Select it again or configure ${preset.env}.`,
+                },
+              ],
+            };
+          const providers = apiKey
+            ? {
+                ...r.config.providers,
+                [arg]: { ...configured, apiKey },
+              }
+            : r.config.providers;
+          const sameProvider = arg === r.config.provider;
           try {
-            const providerModel = r.config.providers[arg]?.model;
+            const providerModel = configured?.model;
             await replaceRuntime(
-              { provider: arg, ...(providerModel ? { model: providerModel } : {}) },
               {
-                beforeSwap: () => control.reset(),
+                provider: arg,
+                providers,
+                ...(providerModel ? { model: providerModel } : {}),
               },
+              sameProvider
+                ? { preserveCompatibleSession: true }
+                : { beforeSwap: () => control.reset() },
             );
+            await saveProviderSelection(arg, {
+              ...(apiKey ? { apiKey } : {}),
+              ...(providerModel ? { model: providerModel } : {}),
+            });
           } catch (error) {
             return {
               messages: [
@@ -793,7 +843,11 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           return {
             messages: [
               {
-                text: `Active provider changed to ${r.config.provider}; incompatible context was reset.`,
+                text: sameProvider
+                  ? apiKey
+                    ? `Credentials updated for ${arg}; session context was preserved.`
+                    : `Provider ${arg} is already active; credentials unchanged.`
+                  : `Active provider changed to ${r.config.provider}; incompatible context was reset.`,
               },
             ],
           };

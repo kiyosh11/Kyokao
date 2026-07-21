@@ -198,8 +198,13 @@ def run(binary):
         assert "Running command" not in shell.output[mark:], "history navigation executed the draft"
         shell.send("\x15")
 
+        mark = len(shell.output)
+        shell.send("/provider ollama\r")
+        shell.wait("API token for ollama", mark)
+        shell.send("\r")
+        shell.wait("Provider ollama is already active; credentials unchanged.", mark)
+
         checks = [
-            ("/provider ollama", "Provider ollama is already active."),
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
             ("/resume missing-session", "Error"),
             ("/memory list", "{}"),
@@ -262,16 +267,30 @@ def run(binary):
         assert not re.search(
             r"(?m)^│\s*(?:You|Kyokao)\s*│$", latest_frame
         ), "user or assistant transcript label was rendered"
+        ready_after_response = len(shell.output)
+        shell.wait("Ready", ready_after_response)
         provider_mark = len(shell.output)
         shell.send("/provider")
         shell.wait("Providers", provider_mark)
         shell.wait("pty", provider_mark)
         shell.wait("active", provider_mark)
+        time.sleep(0.05)
+        shell.read()
+        provider_frame = ANSI.sub(
+            "", shell.output[provider_mark:].rsplit("\x1b[H\x1b[2J", 1)[-1]
+        )
+        assert "/provider pty" not in provider_frame
         shell.send("\x1b")
         time.sleep(0.05)
         provider_mark = len(shell.output)
         shell.send("/provider pty\r")
-        shell.wait("Provider pty is already active.", provider_mark)
+        shell.wait("API token for pty", provider_mark)
+        shell.send("rotated-test-key")
+        time.sleep(0.05)
+        shell.read()
+        assert "rotated-test-key" not in shell.output[provider_mark:]
+        shell.send("\r")
+        shell.wait("Credentials updated for pty; session context was preserved.", provider_mark)
         shell.wait("904 tokens · $0.0000 estimated", provider_mark)
         ready_after_turn = len(shell.output)
         shell.wait("Ready", ready_after_turn)
@@ -356,7 +375,7 @@ def run(binary):
             saved_theme_config = json.load(config_file)
         assert saved_theme_config["theme"] == "solarized-light"
         assert saved_theme_config["codeTheme"] == "github-light"
-        assert saved_theme_config["providers"]["pty"]["apiKey"] == "pty-test-key"
+        assert saved_theme_config["providers"]["pty"]["apiKey"] == "rotated-test-key"
         ready_mark = len(shell.output)
         shell.wait("Ready", ready_mark)
         shell.send("/exit\r")

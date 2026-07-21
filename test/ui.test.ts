@@ -148,6 +148,7 @@ describe('terminal workspace helpers', () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     const commands: string[] = [];
+    const secrets: Array<string | undefined> = [];
     const done = terminalWorkspace({
       input: input as never,
       output: output as never,
@@ -164,6 +165,7 @@ describe('terminal workspace helpers', () => {
           .map((name) => ({
             name: 'provider',
             syntax: `/provider ${name}`,
+            label: name,
             description: name === 'openai' ? 'active · built-in' : 'configured',
             completion: `/provider ${name}`,
             submit: true,
@@ -176,9 +178,13 @@ describe('terminal workspace helpers', () => {
         approval: 'suggest',
       }),
       async onPrompt() {},
-      async onCommand(command) {
+      async onCommand(command, _emit, control) {
         commands.push(command.raw);
         if (command.name === 'exit') return { close: true };
+        if (command.name === 'provider') {
+          secrets.push(await control.promptSecret(`API token for ${command.args[0]}`));
+          return { messages: [{ text: 'provider selected' }] };
+        }
         return { messages: [{ text: `selected ${command.raw}` }] };
       },
     });
@@ -200,10 +206,27 @@ describe('terminal workspace helpers', () => {
 
     input.send('/provider');
     await tick();
-    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Providers');
+    const providerFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
+    expect(providerFrame).toContain('Providers');
+    expect(providerFrame).not.toContain('/provider custom');
     input.send('\x1b[B\r');
     await tick();
     expect(commands).toContain('/provider custom');
+    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('API token for custom');
+    input.send('secret-token');
+    await tick();
+    expect(output.text).not.toContain('secret-token');
+    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('••••');
+    input.send('\r');
+    await tick();
+    expect(secrets).toEqual(['secret-token']);
+    expect(output.text).not.toContain('secret-token');
+
+    input.send('/provider custom\r');
+    await tick();
+    input.send('\x1b');
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    expect(secrets).toEqual(['secret-token', undefined]);
 
     input.send('/exit\r');
     await done;
