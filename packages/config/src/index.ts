@@ -1,5 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import {
+  CODE_THEME_NAMES,
+  TUI_THEME_NAMES,
+  isCodeThemeName,
+  isTuiThemeName,
+  suggestName,
+  type CodeThemeName,
+  type TuiThemeName,
+} from '@kyokao/themes';
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto';
 export interface McpServerConfig {
@@ -27,6 +36,8 @@ export interface SafetyLimits {
   allowedHosts: string[];
 }
 export interface KyokaoConfig {
+  theme: TuiThemeName;
+  codeTheme: CodeThemeName;
   provider: string;
   model: string;
   approval: ApprovalMode;
@@ -47,6 +58,8 @@ export interface KyokaoConfig {
   limits: SafetyLimits;
 }
 export const defaults: KyokaoConfig = {
+  theme: 'kyokao-dark',
+  codeTheme: 'kyokao',
   provider: 'openai',
   model: 'gpt-4o-mini',
   approval: 'auto-edit',
@@ -102,8 +115,16 @@ function validateConfig(value: unknown): asserts value is Partial<KyokaoConfig> 
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('must be an object');
   const c = value as Record<string, unknown>;
-  for (const key of ['provider', 'model'])
+  for (const key of ['provider', 'model', 'theme', 'codeTheme'])
     if (key in c && typeof c[key] !== 'string') throw new Error(`${key} must be a string`);
+  if ('theme' in c && !isTuiThemeName(c.theme as string))
+    throw new Error(
+      `Unknown TUI theme "${String(c.theme)}". Did you mean: ${suggestName(String(c.theme), TUI_THEME_NAMES).join(', ')}?`,
+    );
+  if ('codeTheme' in c && !isCodeThemeName(c.codeTheme as string))
+    throw new Error(
+      `Unknown code theme "${String(c.codeTheme)}". Did you mean: ${suggestName(String(c.codeTheme), CODE_THEME_NAMES).join(', ')}?`,
+    );
   if ('approval' in c && !['suggest', 'auto-edit', 'full-auto'].includes(c.approval as string))
     throw new Error('approval must be suggest, auto-edit, or full-auto');
   if (
@@ -278,13 +299,19 @@ export async function loadConfig(
     env?: NodeJS.ProcessEnv;
     cli?: Partial<KyokaoConfig>;
     profile?: string;
+    globalPath?: string;
   } = {},
 ): Promise<KyokaoConfig> {
   const cwd = opts.cwd ?? process.cwd();
   const env = opts.env ?? process.env;
-  let result = merge(defaults, await readConfig(globalConfigPath())) as KyokaoConfig;
+  let result = merge(
+    defaults,
+    await readConfig(opts.globalPath ?? globalConfigPath()),
+  ) as KyokaoConfig;
   result = merge(result, await readConfig(join(cwd, '.kyokao.json'))) as KyokaoConfig;
   const envConfig: Partial<KyokaoConfig> = {
+    theme: env.KYOKAO_THEME as TuiThemeName | undefined,
+    codeTheme: env.KYOKAO_CODE_THEME as CodeThemeName | undefined,
     provider: env.KYOKAO_PROVIDER,
     model: env.KYOKAO_MODEL,
     approval: env.KYOKAO_APPROVAL as ApprovalMode | undefined,
@@ -312,6 +339,14 @@ export async function loadConfig(
     );
   if (!['suggest', 'auto-edit', 'full-auto'].includes(result.approval))
     throw new Error('approval must be suggest, auto-edit, or full-auto');
+  if (!isTuiThemeName(result.theme))
+    throw new Error(
+      `Unknown TUI theme "${result.theme}". Did you mean: ${suggestName(result.theme, TUI_THEME_NAMES).join(', ')}?`,
+    );
+  if (!isCodeThemeName(result.codeTheme))
+    throw new Error(
+      `Unknown code theme "${result.codeTheme}". Did you mean: ${suggestName(result.codeTheme, CODE_THEME_NAMES).join(', ')}?`,
+    );
   if (
     !Number.isInteger(result.maxIterations) ||
     result.maxIterations < 1 ||
@@ -363,6 +398,15 @@ export async function atomicWrite(path: string, data: unknown): Promise<void> {
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
   await rename(tmp, path);
+}
+
+export async function saveGlobalThemes(
+  theme: TuiThemeName,
+  codeTheme: CodeThemeName,
+  path = globalConfigPath(),
+): Promise<void> {
+  const saved = await readConfig(path);
+  await atomicWrite(path, { ...saved, theme, codeTheme });
 }
 
 export interface ProviderSetupInput {

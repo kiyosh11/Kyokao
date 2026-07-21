@@ -61,6 +61,9 @@ importers:
       '@kyokao/providers':
         specifier: workspace:*
         version: link:../providers
+      '@kyokao/themes':
+        specifier: workspace:*
+        version: link:../themes
       '@kyokao/tools':
         specifier: workspace:*
         version: link:../tools
@@ -71,7 +74,11 @@ importers:
         specifier: ^12.1.0
         version: 12.1.0
 
-  packages/config: {}
+  packages/config:
+    dependencies:
+      '@kyokao/themes':
+        specifier: workspace:*
+        version: link:../themes
 
   packages/memory:
     dependencies:
@@ -85,6 +92,8 @@ importers:
         specifier: ^4.104.0
         version: 4.104.0
 
+  packages/themes: {}
+
   packages/tools:
     dependencies:
       '@kyokao/config':
@@ -96,9 +105,9 @@ importers:
       '@kyokao/agent':
         specifier: workspace:*
         version: link:../agent
-      picocolors:
-        specifier: ^1.1.1
-        version: 1.1.1
+      '@kyokao/themes':
+        specifier: workspace:*
+        version: link:../themes
 
 packages:
   '@esbuild/aix-ppc64@0.21.5':

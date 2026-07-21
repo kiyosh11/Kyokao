@@ -1,4 +1,3 @@
-import pc from 'picocolors';
 import { createInterface } from 'node:readline/promises';
 import type { ReadStream, WriteStream } from 'node:tty';
 import {
@@ -13,34 +12,31 @@ import {
   type InputEvent,
 } from './editor.js';
 import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
-import { theme } from './theme.js';
+import { createThemeContext, type ThemeContext } from './theme.js';
+import {
+  CodeRenderer,
+  MarkdownRenderer,
+  highlightCode as renderHighlightedCode,
+  renderMarkdown as renderThemedMarkdown,
+} from './markdown.js';
 import { PromptScheduler, type PromptBackend, type SchedulerState } from '@kyokao/agent';
-export { theme } from './theme.js';
+export * from './theme.js';
+export * from './markdown.js';
 export * from './editor.js';
 export * from './terminal.js';
 
-const keywords =
-  /\b(const|let|var|function|return|if|else|for|while|class|interface|type|import|from|export|async|await|new|true|false|null|undefined)\b/g;
-export function highlightCode(source: string, language = ''): string {
-  const color = (value: string) =>
-    language.toLowerCase().includes('json') ? pc.yellow(value) : pc.cyan(value);
-  return source
-    .split('\n')
-    .map((line) => {
-      const trimmed = line.trimStart();
-      if (trimmed.startsWith('//') || trimmed.startsWith('#')) return pc.dim(line);
-      return line
-        .replace(keywords, (keyword) => pc.magenta(keyword))
-        .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, (value) => color(value));
-    })
-    .join('\n');
+export function highlightCode(
+  source: string,
+  language = '',
+  context = createThemeContext({ colorLevel: 0 }),
+): string {
+  return renderHighlightedCode(source, language, context);
 }
-export function renderMarkdown(value: string): string {
-  return value.replace(
-    /```(\w*)\n([\s\S]*?)```/g,
-    (_, language: string, code: string) =>
-      `\n${highlightCode(code.replace(/\n$/, ''), language)}\n`,
-  );
+export function renderMarkdown(
+  value: string,
+  context = createThemeContext({ colorLevel: 0 }),
+): string {
+  return renderThemedMarkdown(value, context);
 }
 
 export type WorkspaceCommand =
@@ -57,7 +53,8 @@ export type WorkspaceCommand =
   | 'doctor'
   | 'diff'
   | 'queue'
-  | 'capy';
+  | 'capy'
+  | 'theme';
 
 export interface CommandDefinition {
   name: WorkspaceCommand;
@@ -90,6 +87,11 @@ export const workspaceCommands: readonly CommandDefinition[] = [
   { name: 'diff', syntax: '/diff', description: 'Show the working-tree diff' },
   { name: 'queue', syntax: '/queue [clear|retry]', description: 'List or manage queued prompts' },
   { name: 'capy', syntax: '/capy', description: 'Show Capy remote thread status and links' },
+  {
+    name: 'theme',
+    syntax: '/theme [name|code <name>|save]',
+    description: 'Preview, switch, or save themes',
+  },
   { name: 'clear', syntax: '/clear', description: 'Clear the visible transcript' },
   { name: 'exit', syntax: '/exit', description: 'Exit Kyokao' },
 ] as const;
@@ -147,54 +149,101 @@ export function layoutWorkspace(width: number, height: number, paletteRows = 0) 
 export function wrapWorkspaceText(value: string, width: number): string[] {
   const safeWidth = Math.max(1, width);
   const rows: string[] = [];
+  let carriedActive = '';
   for (const source of value.split('\n')) {
     if (!source) {
-      rows.push('');
+      rows.push(carriedActive ? `${carriedActive}\x1b[0m` : '');
       continue;
     }
-    let line = '';
-    let cells = 0;
-    for (const value of graphemes(source)) {
-      const next = graphemeWidth(value);
-      if (line && cells + next > safeWidth) {
-        rows.push(line);
-        line = '';
-        cells = 0;
+    const parts = source.match(/\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+|\x1b/g) ?? [];
+    const tokens = parts.flatMap((part) =>
+      part.startsWith('\x1b[')
+        ? [{ raw: part, width: 0, whitespace: false, ansi: true }]
+        : graphemes(part).map((raw) => ({
+            raw,
+            width: graphemeWidth(raw),
+            whitespace: /^\s$/u.test(raw),
+            ansi: false,
+          })),
+    );
+    const groups: (typeof tokens)[] = [];
+    let group: typeof tokens = [];
+    let category: boolean | undefined;
+    for (const token of tokens) {
+      if (token.ansi) {
+        group.push(token);
+        continue;
       }
-      line += value;
-      cells += next;
+      if (category !== undefined && category !== token.whitespace) {
+        groups.push(group);
+        group = [];
+      }
+      category = token.whitespace;
+      group.push(token);
+    }
+    if (group.length) groups.push(group);
+
+    let line = carriedActive;
+    let active = carriedActive;
+    let cells = 0;
+    const finish = () => {
+      rows.push(`${line}${active ? '\x1b[0m' : ''}`);
+      line = active;
+      cells = 0;
+    };
+    const append = (token: (typeof tokens)[number]) => {
+      if (token.ansi) {
+        line += token.raw;
+        if (token.raw.endsWith('m'))
+          active = token.raw === '\x1b[0m' ? '' : `${active}${token.raw}`;
+        return;
+      }
+      if (cells > 0 && cells + token.width > safeWidth) finish();
+      line += token.raw;
+      cells += token.width;
+    };
+    for (const item of groups) {
+      const itemWidth = item.reduce((total, token) => total + token.width, 0);
+      const isWord = item.some((token) => !token.ansi && !token.whitespace);
+      if (isWord && cells > 0 && cells + itemWidth > safeWidth) finish();
+      for (const token of item) append(token);
     }
     rows.push(line);
+    carriedActive = active;
   }
   return rows;
 }
 
-export function renderTranscript(entries: TranscriptEntry[], width: number): string[] {
-  const contentWidth = Math.max(4, width - 4);
+export function renderTranscript(
+  entries: TranscriptEntry[],
+  width: number,
+  context = createThemeContext({ colorLevel: 0 }),
+): string[] {
+  const contentWidth = Math.max(3, width - 5);
+  const markdown = new MarkdownRenderer(context);
   return entries.flatMap((entry) => {
     const label =
       entry.kind === 'user'
-        ? theme.user('You')
+        ? context.tui('user', 'You')
         : entry.kind === 'assistant'
-          ? theme.assistant('Kyokao')
+          ? context.tui('assistant', 'Kyokao')
           : entry.kind === 'tool'
-            ? theme.tool('Tool')
+            ? context.tui('tool', 'Tool')
             : entry.kind === 'error'
-              ? theme.error('Error')
-              : theme.muted(entry.kind === 'status' ? 'Status' : 'System');
-    const paint =
+              ? context.tui('error', 'Error')
+              : context.tui('muted', entry.kind === 'status' ? 'Status' : 'System');
+    const token =
       entry.kind === 'assistant'
-        ? theme.assistant
+        ? 'assistant'
         : entry.kind === 'tool'
-          ? theme.tool
+          ? 'tool'
           : entry.kind === 'error'
-            ? theme.error
-            : (value: string) => value;
+            ? 'error'
+            : 'primary';
+    const rendered = markdown.render(entry.text);
     return [
       `${label}`,
-      ...wrapWorkspaceText(entry.text, contentWidth).map(
-        (line) => `  ${paint(renderMarkdown(line))}`,
-      ),
+      ...wrapWorkspaceText(rendered, contentWidth).map((line) => `  ${context.tui(token, line)}`),
       '',
     ];
   });
@@ -224,6 +273,7 @@ export interface TerminalWorkspaceOptions {
   input?: ReadStream;
   output?: WriteStream;
   screen?: InteractiveScreen;
+  themeContext?: ThemeContext;
   header: () => WorkspaceHeader;
   backend?: PromptBackend;
   onQueueChange?: (queue: readonly string[]) => Promise<void> | void;
@@ -264,6 +314,7 @@ export interface WorkspaceRenderState {
   animationFrame?: number;
   usage?: WorkspaceUsage;
   scheduler?: SchedulerState;
+  themeContext?: ThemeContext;
 }
 
 function border(width: number, left: string, right: string, label = ''): string {
@@ -296,6 +347,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   palette: CommandDefinition[];
   transcriptHeight: number;
 } {
+  const context = state.themeContext ?? createThemeContext({ colorLevel: 0 });
   const width = Math.max(12, state.width);
   const height = Math.max(8, state.height);
   const inner = width - 2;
@@ -321,7 +373,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   const paletteRows = matches.length && paletteLimit ? paletteWindow.commands.length : 0;
   const paletteBlock = paletteRows ? paletteRows + 1 : 0;
   const transcriptHeight = Math.max(1, height - fixedRows - paletteBlock);
-  const renderedTranscript = renderTranscript(state.transcript, width);
+  const renderedTranscript = renderTranscript(state.transcript, width, context);
   const maxScroll = Math.max(0, renderedTranscript.length - transcriptHeight);
   const scrollOffset = Math.min(state.scrollOffset ?? 0, maxScroll);
   const end = renderedTranscript.length - scrollOffset;
@@ -352,13 +404,13 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
               ? `Viewing earlier output (${scrollOffset} lines) · End returns`
               : 'Ready';
   const lines = [
-    theme.muted(border(width, '╭', '╮')),
-    `│${theme.brand(fittedTitle)}${headerGap}${theme.muted(fittedMeta)}│`,
-    theme.muted(border(width, '├', '┤')),
+    context.tui('border', border(width, '╭', '╮')),
+    `│${context.tui('brand', fittedTitle)}${headerGap}${context.tui('muted', fittedMeta)}│`,
+    context.tui('border', border(width, '├', '┤')),
     ...transcriptRows,
   ];
   if (paletteRows) {
-    lines.push(theme.muted(border(width, '├', '┤', 'Commands')));
+    lines.push(context.tui('border', border(width, '├', '┤', 'Commands')));
     for (const [index, item] of paletteWindow.commands.entries()) {
       const absoluteIndex = paletteWindow.start + index;
       const marker = absoluteIndex === paletteIndex ? '›' : ' ';
@@ -367,28 +419,40 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
         Math.max(4, Math.floor((inner - 4) * 0.45)),
       );
       const syntax = padDisplay(item.syntax, syntaxWidth);
-      lines.push(
-        framed(
-          `${marker} ${syntax} ${truncateDisplay(item.description, inner - syntaxWidth - 4)}`,
-          width,
-        ),
+      const row = framed(
+        `${marker} ${syntax} ${truncateDisplay(item.description, inner - syntaxWidth - 4)}`,
+        width,
       );
+      lines.push(absoluteIndex === paletteIndex ? context.tui('selected', row) : row);
     }
   }
   if (queueRows) {
-    lines.push(theme.muted(border(width, '├', '┤', `Queue ${queued.length}`)));
+    lines.push(context.tui('border', border(width, '├', '┤', `Queue ${queued.length}`)));
     for (const prompt of queued.slice(0, 2))
-      lines.push(framed(`• ${truncateDisplay(prompt.replace(/\n/g, ' ↵ '), inner - 3)}`, width));
+      lines.push(
+        context.tui(
+          'tool',
+          framed(`• ${truncateDisplay(prompt.replace(/\n/g, ' ↵ '), inner - 3)}`, width),
+        ),
+      );
   }
-  lines.push(theme.muted(border(width, '├', '┤', status)));
-  for (const row of visibleComposer) lines.push(framed(row, width));
-  lines.push(theme.muted(border(width, '╰', '╯')));
+  const statusToken = state.approval
+    ? 'warning'
+    : state.scheduler?.phase === 'failed'
+      ? 'error'
+      : 'status';
+  lines.push(context.tui(statusToken, border(width, '├', '┤', status)));
+  for (const row of visibleComposer) lines.push(context.tui('inputAccent', framed(row, width)));
+  lines.push(context.tui('border', border(width, '╰', '╯')));
   if (footerRows)
     lines.push(
-      renderWorkspaceFooter(
-        width,
-        state.usage,
-        Boolean(state.scheduler?.active || state.scheduler?.phase === 'stopping'),
+      context.tui(
+        'muted',
+        renderWorkspaceFooter(
+          width,
+          state.usage,
+          Boolean(state.scheduler?.active || state.scheduler?.phase === 'stopping'),
+        ),
       ),
     );
   while (lines.length < height) lines.splice(3, 0, framed('', width));
@@ -447,6 +511,8 @@ async function runTerminalWorkspace(
 ): Promise<void> {
   const input = screen.input;
   const output = screen.output;
+  const context =
+    options.themeContext ?? createThemeContext({ isTTY: output.isTTY, env: process.env });
   const editor = new EditorState();
   const history = new PromptHistory();
   const parser = new TerminalInputParser();
@@ -527,7 +593,7 @@ async function runTerminalWorkspace(
     if (closed) return;
     const matches = palette();
     paletteIndex = selectPalette(paletteIndex, 0, matches.length);
-    const rendered = renderTranscript(transcript, output.columns ?? 80);
+    const rendered = renderTranscript(transcript, output.columns ?? 80, context);
     const requestedScrollOffset = scrollOffset;
     let frame = renderWorkspaceScreen({
       width: output.columns ?? 80,
@@ -543,6 +609,7 @@ async function runTerminalWorkspace(
       animationFrame: Math.floor(Date.now() / 350) % 3,
       usage,
       scheduler: schedulerState,
+      themeContext: context,
     });
     const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -561,6 +628,7 @@ async function runTerminalWorkspace(
         animationFrame: Math.floor(Date.now() / 350) % 3,
         usage,
         scheduler: schedulerState,
+        themeContext: context,
       });
     screen.draw(frame);
   };
@@ -763,25 +831,31 @@ export async function terminalWorkspace(options: TerminalWorkspaceOptions): Prom
   });
 }
 
-export const ui = {
-  info: (s: string) => console.log(pc.cyan(s)),
-  error: (s: string) => console.error(pc.red(s)),
-  assistant: (s: string) => console.log(pc.green(renderMarkdown(s))),
-  tool: (s: string) => console.error(pc.dim(`• ${s}`)),
-  diff: (s: string) =>
-    console.log(
-      s
-        .split('\n')
-        .map((l) => (l.startsWith('+') ? pc.green(l) : l.startsWith('-') ? pc.red(l) : l))
-        .join('\n'),
-    ),
-  async approve(action: string, detail: string) {
-    if (!process.stdin.isTTY) return false;
-    const r = createInterface({ input: process.stdin, output: process.stdout });
-    const a = await r.question(`${pc.yellow(`Allow ${action}`)} ${detail}? [y/N] `);
-    r.close();
-    return /^y(es)?$/i.test(a);
-  },
-};
+export function createUi(
+  context = createThemeContext({ isTTY: process.stdout.isTTY, env: process.env }),
+  streams: { stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {},
+) {
+  const stdout = streams.stdout ?? process.stdout;
+  const stderr = streams.stderr ?? process.stderr;
+  const markdown = new MarkdownRenderer(context);
+  const code = new CodeRenderer(context);
+  return {
+    info: (value: string) => stdout.write(`${context.tui('status', value)}\n`),
+    error: (value: string) => stderr.write(`${context.tui('error', value)}\n`),
+    assistant: (value: string) =>
+      stdout.write(`${context.tui('assistant', markdown.render(value))}\n`),
+    tool: (value: string) => stderr.write(`${context.tui('tool', `• ${value}`)}\n`),
+    diff: (value: string) => stdout.write(`${code.render(value, 'diff')}\n`),
+    async approve(action: string, detail: string) {
+      if (!process.stdin.isTTY) return false;
+      const r = createInterface({ input: process.stdin, output: stdout });
+      const a = await r.question(`${context.tui('warning', `Allow ${action}`)} ${detail}? [y/N] `);
+      r.close();
+      return /^y(es)?$/i.test(a);
+    },
+  };
+}
+
+export const ui = createUi();
 
 export * from './setup.js';

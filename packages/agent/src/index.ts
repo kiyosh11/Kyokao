@@ -32,7 +32,28 @@ export interface AgentOptions {
 }
 
 export const systemPrompt = (workspace: string, instructions = '') =>
-  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely.${instructions ? `\n\nRepository instructions:\n${instructions}` : ''}`;
+  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely. When the user requests a repository change, do not stop after describing future work ("I'll create", "let me update", or similar): invoke the appropriate write/patch tools, inspect the result, and verify it before giving a finished answer. For explanation-only questions, answer directly and do not force a mutation tool.${instructions ? `\n\nRepository instructions:\n${instructions}` : ''}`;
+
+const changeVerb =
+  '(?:create|write|edit|modify|update|patch|implement|add|remove|delete|fix|refactor|rename|build|make|generate|migrate|upgrade|optimize)';
+const explanationLead =
+  /^\s*(?:explain|describe|summarize|review|analy[sz]e|what|why|how|where|list|show|tell)\b/i;
+const futureIntent = new RegExp(
+  `\\b(?:I(?:'ll| will| am going to)|Let me|I need to|I should|Next,? I(?:'ll| will))\\s+(?:now\\s+)?${changeVerb}\\b`,
+  'i',
+);
+const explicitFollowupChange = new RegExp(`\\b(?:and|then|also)\\s+${changeVerb}\\b`, 'i');
+const requestedChange = new RegExp(`\\b${changeVerb}\\b`, 'i');
+
+export function isFutureIntentOnly(content: string | null, prompt: string): boolean {
+  if (!content?.trim() || !futureIntent.test(content)) return false;
+  if (explanationLead.test(prompt) && !explicitFollowupChange.test(prompt)) return false;
+  return requestedChange.test(prompt);
+}
+
+const intentContinuation =
+  'The previous response only stated future intent and did not complete the requested repository change. Continue now: invoke the appropriate write_file/apply_patch (or other required) tools, inspect the result, run a relevant verification, and only then report completed work. Do not reply with another plan.';
+const maxIntentContinuations = 2;
 
 export async function loadInstructionFiles(workspace: string): Promise<string> {
   const names = ['SOUL.md', 'soul.md', 'CLAUDE.md', 'claude.md', 'AGENTS.md', 'KYOKAO.md'];
@@ -131,6 +152,7 @@ export class Agent {
     const maxContext = this.options.contextWindow ?? 16_000;
     const threshold = Math.floor(maxContext * (this.options.compressionThreshold ?? 0.8));
     let toolCalls = 0;
+    let intentContinuations = 0;
     for (let i = 0; i < this.options.maxIterations; i++) {
       this.options.signal?.throwIfAborted();
       if (
@@ -206,6 +228,19 @@ export class Agent {
       if (m.content && this.options.provider.options.stream === false)
         this.options.onEvent?.('assistant', m.content);
       if (!m.tool_calls?.length) {
+        if (isFutureIntentOnly(m.content, prompt)) {
+          if (intentContinuations >= maxIntentContinuations)
+            throw new Error(
+              `Model returned future intent without completing the requested change after ${maxIntentContinuations} continuations`,
+            );
+          intentContinuations += 1;
+          const continuation: ChatMessage = { role: 'system', content: intentContinuation };
+          fullMessages.push(continuation);
+          s.messages.push(continuation);
+          s.checkpoint = `intent continuation ${intentContinuations}`;
+          await this.options.store.saveSession(s);
+          continue;
+        }
         s.checkpoint = 'completed';
         await this.options.store.saveSession(s);
         return s;

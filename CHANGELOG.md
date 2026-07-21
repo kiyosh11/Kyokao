@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Added immutable, workspace-scoped TUI and code theme registries with eight TUI themes, seven code themes, ANSI 16/256/truecolor negotiation, `NO_COLOR`, configuration/CLI precedence, live `/theme` switching, atomic theme persistence, and `kyokao themes` previews.
+- Added streaming-safe Markdown rendering and deterministic language-aware highlighting for TypeScript/JavaScript, Python, JSON, shell, Go, Rust, Java/C/C++, HTML/XML, CSS, YAML, SQL, Markdown, and diff.
+- Fixed ANSI/Unicode transcript geometry with lossless word-aware wrapping and hard-wrap fallback at narrow Windows terminal widths.
+- Added a bounded coding completion guard that continues clearly unfinished future-intent responses through repository mutation and verification without forcing tools for explanation-only prompts.
+
 ## 0.4.0
 
 - Added a production prompt scheduler: the composer remains editable during work, Enter replaces the active turn, Ctrl-Enter queues FIFO follow-ups, and `/queue` exposes retryable pending work.
