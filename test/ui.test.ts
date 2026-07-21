@@ -11,6 +11,7 @@ import {
   MODIFY_OTHER_KEYS_DISABLE,
   MODIFY_OTHER_KEYS_ENABLE,
   EditorState,
+  createThemeContext,
   displayWidth,
   filterWorkspaceCommands,
   layoutEditor,
@@ -78,6 +79,19 @@ describe('terminal workspace helpers', () => {
     expect(parseWorkspaceCommand('hello')).toBeUndefined();
     expect(parseWorkspaceCommand('/wat')?.name).toBeUndefined();
     expect(filterWorkspaceCommands('/pro').map((entry) => entry.name)).toContain('provider');
+    const themeContext = createThemeContext({
+      tuiTheme: 'dracula',
+      codeTheme: 'github-light',
+      colorLevel: 0,
+    });
+    const themes = filterWorkspaceCommands('/theme', themeContext);
+    expect(themes.map((entry) => entry.syntax)).toContain('/theme dracula');
+    expect(themes.find((entry) => entry.syntax === '/theme dracula')?.description).toContain(
+      'active',
+    );
+    expect(
+      filterWorkspaceCommands('/theme code g', themeContext).map((entry) => entry.syntax),
+    ).toEqual(['/theme code github-light']);
     expect(selectPalette(0, -1, 3)).toBe(0);
     expect(selectPalette(2, 1, 3)).toBe(2);
     const commands = filterWorkspaceCommands('/');
@@ -128,6 +142,51 @@ describe('terminal workspace helpers', () => {
     expect(input.isRaw).toBe(false);
     expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
+  });
+
+  it('navigates nested TUI and code theme palettes with arrows and Enter', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const commands: string[] = [];
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      themeContext: createThemeContext({
+        tuiTheme: 'kyokao-dark',
+        codeTheme: 'kyokao',
+        colorLevel: 0,
+      }),
+      header: () => ({
+        workspace: '~',
+        provider: 'fake',
+        model: 'fake',
+        approval: 'suggest',
+      }),
+      async onPrompt() {},
+      async onCommand(command) {
+        commands.push(command.raw);
+        if (command.name === 'exit') return { close: true };
+        return { messages: [{ text: `selected ${command.raw}` }] };
+      },
+    });
+
+    input.send('/theme');
+    await tick();
+    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Themes');
+    input.send('\x1b[B\r');
+    await tick();
+    expect(commands).toContain('/theme kyokao-light');
+
+    input.send('/theme c\r');
+    await tick();
+    expect(commands).not.toContain('/theme c');
+    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Code themes');
+    input.send('\x1b[B\r');
+    await tick();
+    expect(commands).toContain('/theme code dracula');
+
+    input.send('/exit\r');
+    await done;
   });
 
   it('cancels an active request before exiting and rejects non-TTY startup', async () => {

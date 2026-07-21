@@ -12,7 +12,12 @@ import {
   type InputEvent,
 } from './editor.js';
 import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
-import { createThemeContext, type ThemeContext } from './theme.js';
+import {
+  CODE_THEME_NAMES,
+  TUI_THEME_NAMES,
+  createThemeContext,
+  type ThemeContext,
+} from './theme.js';
 import {
   CodeRenderer,
   MarkdownRenderer,
@@ -60,6 +65,8 @@ export interface CommandDefinition {
   name: WorkspaceCommand;
   syntax: string;
   description: string;
+  completion?: string;
+  submit?: boolean;
 }
 
 export const workspaceCommands: readonly CommandDefinition[] = [
@@ -110,7 +117,60 @@ export function parseWorkspaceCommand(value: string): ParsedCommand | undefined 
   return { name, args, raw };
 }
 
-export function filterWorkspaceCommands(value: string): CommandDefinition[] {
+function themePaletteCommands(
+  value: string,
+  context?: ThemeContext,
+): CommandDefinition[] | undefined {
+  const match = value.match(/^\/theme(?:\s+(.*))?$/i);
+  if (!match) return undefined;
+  const tail = (match[1] ?? '').trimStart();
+  if (/^code(?:\s|$)/i.test(tail)) {
+    const query = tail
+      .replace(/^code(?:\s+)?/i, '')
+      .trim()
+      .toLowerCase();
+    return CODE_THEME_NAMES.filter((name) => name.startsWith(query)).map((name) => ({
+      name: 'theme',
+      syntax: `/theme code ${name}`,
+      description: `Code highlighting theme${context?.names.code === name ? ' · active' : ''}`,
+      completion: `/theme code ${name}`,
+      submit: true,
+    }));
+  }
+  const query = tail.trim().toLowerCase();
+  const themes: CommandDefinition[] = TUI_THEME_NAMES.map((name) => ({
+    name: 'theme',
+    syntax: `/theme ${name}`,
+    description: `TUI theme${context?.names.tui === name ? ' · active' : ''}`,
+    completion: `/theme ${name}`,
+    submit: true,
+  }));
+  const actions: CommandDefinition[] = [
+    {
+      name: 'theme',
+      syntax: '/theme code',
+      description: 'Choose a code highlighting theme',
+      completion: '/theme code ',
+    },
+    {
+      name: 'theme',
+      syntax: '/theme save',
+      description: 'Save active themes globally',
+      completion: '/theme save',
+      submit: true,
+    },
+  ];
+  return [...themes, ...actions].filter((entry) =>
+    entry.syntax.slice('/theme '.length).toLowerCase().startsWith(query),
+  );
+}
+
+export function filterWorkspaceCommands(
+  value: string,
+  context?: ThemeContext,
+): CommandDefinition[] {
+  const themeCommands = themePaletteCommands(value, context);
+  if (themeCommands !== undefined) return themeCommands;
   const query = value.trim().toLowerCase().replace(/^\//, '').split(/\s/, 1)[0] ?? '';
   return workspaceCommands.filter(
     (entry) => entry.name.startsWith(query) || entry.description.toLowerCase().includes(query),
@@ -353,7 +413,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   const inner = width - 2;
   const matches =
     state.editor.text.startsWith('/') && state.busyKind !== 'command'
-      ? filterWorkspaceCommands(state.editor.text)
+      ? filterWorkspaceCommands(state.editor.text, context)
       : [];
   const paletteIndex = selectPalette(state.paletteIndex ?? 0, 0, matches.length);
   const editorLayout = layoutEditor(state.editor.text, state.editor.cursor, Math.max(1, inner - 1));
@@ -410,7 +470,12 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
     ...transcriptRows,
   ];
   if (paletteRows) {
-    lines.push(context.tui('border', border(width, '├', '┤', 'Commands')));
+    const paletteLabel = /^\/theme\s+code(?:\s|$)/i.test(state.editor.text)
+      ? 'Code themes'
+      : /^\/theme(?:\s|$)/i.test(state.editor.text)
+        ? 'Themes'
+        : 'Commands';
+    lines.push(context.tui('border', border(width, '├', '┤', paletteLabel)));
     for (const [index, item] of paletteWindow.commands.entries()) {
       const absoluteIndex = paletteWindow.start + index;
       const marker = absoluteIndex === paletteIndex ? '›' : ' ';
@@ -587,7 +652,7 @@ async function runTerminalWorkspace(
   };
   const palette = () =>
     editor.text.startsWith('/') && busyKind !== 'command'
-      ? filterWorkspaceCommands(editor.text)
+      ? filterWorkspaceCommands(editor.text, context)
       : [];
   const draw = () => {
     if (closed) return;
@@ -765,11 +830,24 @@ async function runTerminalWorkspace(
             void runPrompt(prompt, 'queue');
           }
         } else if (key === 'tab' && palette().length) {
-          editor.set(`/${palette()[paletteIndex]!.name} `);
+          const selected = palette()[paletteIndex]!;
+          editor.set(selected.completion ?? `/${selected.name} `);
           history.detach();
+          paletteIndex = 0;
         } else if (key === 'enter') {
-          const prompt = editor.text.trim();
+          let prompt = editor.text.trim();
           if (prompt) {
+            const selected = palette()[paletteIndex];
+            if (selected?.completion && selected.completion.trim() !== prompt) {
+              if (!selected.submit) {
+                editor.set(selected.completion);
+                history.detach();
+                paletteIndex = 0;
+                draw();
+                return;
+              }
+              prompt = selected.completion.trim();
+            }
             if (
               prompt.startsWith('/') &&
               palette().length &&
