@@ -338,6 +338,7 @@ export interface TerminalWorkspaceOptions {
   header: () => WorkspaceHeader;
   backend?: PromptBackend;
   onQueueChange?: (queue: readonly string[]) => Promise<void> | void;
+  onSessionChange?: () => Promise<void> | void;
   commandPalette?: (value: string) => CommandDefinition[] | undefined;
   onApprovalHandler?: (approve: (action: string, detail: string) => Promise<boolean>) => void;
   onPrompt?: (
@@ -484,8 +485,11 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
       approval: 'Approval modes',
       memory: 'Memory',
       queue: 'Queue actions',
+      resume: 'Sessions',
+      help: 'Command help',
     };
-    const paletteCommand = matches[0]?.name;
+    const commandName = state.editor.text.match(/^\/([a-z-]+)(?:\s|$)/i)?.[1]?.toLowerCase();
+    const paletteCommand = workspaceCommands.find((entry) => entry.name === commandName)?.name;
     const paletteLabel =
       (paletteCommand ? commandLabels[paletteCommand] : undefined) ??
       (/^\/theme\s+code(?:\s|$)/i.test(state.editor.text)
@@ -659,6 +663,7 @@ async function runTerminalWorkspace(
       schedulerState = state;
       busy = Boolean(state.active) || ['stopping', 'starting-replacement'].includes(state.phase);
       busyKind = busy ? 'prompt' : undefined;
+      if (state.phase === 'idle' && !state.active) void options.onSessionChange?.();
       draw();
     },
     onRunStart: (prompt) => emit('user', prompt),

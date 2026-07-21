@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+- Added composer pickers for command help, live provider models, resumable sessions, and memory deletion; refreshed session/model choices as runtime state changes and tightened invalid memory/queue command handling.
+
 ## 0.5.2
 
 - Simplified provider drop-up rows to provider names and added masked in-composer API-token entry with atomic credential persistence, cancellation, and session-preserving credential rotation.

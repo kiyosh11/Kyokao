@@ -61,7 +61,7 @@ const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: local and Capy remote coding agents')
-  .version('0.5.2')
+  .version('0.5.3')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -528,6 +528,24 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
     r = candidate;
     backend = candidateBackend;
   };
+  let sessionChoices = await r.store.listSessions();
+  let memoryChoices = await r.store.getMemory();
+  let providerModels: string[] = [];
+  const refreshProviderModels = async () => {
+    const current = r;
+    try {
+      const signal = AbortSignal.timeout(3_000);
+      const models = current.capy
+        ? (await current.capy.models(signal))
+            .filter((model) => model.captainEligible)
+            .map((model) => model.id)
+        : await current.provider!.models(signal);
+      if (r === current) providerModels = models;
+    } catch {
+      if (r === current) providerModels = [];
+    }
+  };
+  void refreshProviderModels();
   try {
     await terminalWorkspace({
       screen,
@@ -541,6 +559,13 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
         if (!session) return;
         session.pendingPrompts = [...queue];
         await r.store.saveSession(session);
+        sessionChoices = [
+          session,
+          ...sessionChoices.filter((candidate) => candidate.id !== session.id),
+        ];
+      },
+      onSessionChange: async () => {
+        sessionChoices = await r.store.listSessions();
       },
       commandPalette: (value) => {
         const providers = [
@@ -566,20 +591,38 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
               description: `${name === r.config.provider ? 'active · ' : ''}${kind} · ${readiness}`,
             };
           });
+        const models: Array<{ value: string; label?: string; description: string }> = [
+          { value: r.config.model, description: 'active model' },
+        ];
+        const modelNames = new Set([r.config.model]);
+        for (const [name, model] of Object.entries(r.config.aliases)) {
+          if (modelNames.has(name)) continue;
+          modelNames.add(name);
+          models.push({ value: name, description: `alias → ${model}` });
+        }
+        for (const model of providerModels) {
+          if (modelNames.has(model)) continue;
+          modelNames.add(model);
+          models.push({ value: model, description: `available from ${r.config.provider}` });
+        }
+        const memoryDelete = value.match(/^\/memory\s+delete(?:\s+(.*))?$/i);
+        if (memoryDelete) {
+          const query = (memoryDelete[1] ?? '').trimStart().toLowerCase();
+          return Object.keys(memoryChoices)
+            .filter((key) => key.toLowerCase().startsWith(query))
+            .sort()
+            .map((key) => ({
+              name: 'memory',
+              syntax: `/memory delete ${key}`,
+              label: key,
+              description: 'delete saved memory',
+              completion: `/memory delete ${key}`,
+              submit: true,
+            }));
+        }
         return (
           choicePalette(value, 'provider', providers) ??
-          choicePalette(value, 'model', [
-            {
-              value: r.config.model,
-              description: 'active model',
-            },
-            ...Object.entries(r.config.aliases)
-              .filter(([name]) => name !== r.config.model)
-              .map(([name, model]) => ({
-                value: name,
-                description: `alias → ${model}`,
-              })),
-          ]) ??
+          choicePalette(value, 'model', models) ??
           choicePalette(value, 'approval', [
             {
               value: 'suggest',
@@ -613,7 +656,25 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
             { value: 'list', description: 'show queued prompts' },
             { value: 'clear', description: 'remove all queued prompts' },
             { value: 'retry', description: 'retry after a queue error' },
-          ])
+          ]) ??
+          choicePalette(
+            value,
+            'resume',
+            sessionChoices.map((session) => ({
+              value: session.id,
+              label: session.task?.trim().slice(0, 28) || session.id.slice(0, 8),
+              description: `${session.id.slice(0, 8)} · ${session.checkpoint ?? 'saved'} · ${session.updatedAt.slice(0, 16)}`,
+            })),
+          ) ??
+          choicePalette(
+            value,
+            'help',
+            workspaceCommands.map((entry) => ({
+              value: entry.name,
+              label: `/${entry.name}`,
+              description: entry.description,
+            })),
+          )
         );
       },
       header: () => ({
@@ -703,12 +764,23 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           };
         }
         if (command.name === 'sessions') {
-          const sessions = await r.store.listSessions();
+          sessionChoices = await r.store.listSessions();
           return {
             messages: [
               {
-                text: sessions.length
-                  ? sessions.map((s) => `${s.id}  ${s.updatedAt}  ${s.task ?? ''}`).join('\n')
+                text: sessionChoices.length
+                  ? sessionChoices
+                      .map((session) =>
+                        [
+                          session.id,
+                          session.updatedAt,
+                          session.checkpoint ?? 'saved',
+                          session.task ?? '',
+                        ]
+                          .filter(Boolean)
+                          .join('  '),
+                      )
+                      .join('\n')
                   : 'No saved sessions.',
               },
             ],
@@ -718,6 +790,10 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           if (command.args.length !== 1)
             return { messages: [{ kind: 'error', text: 'Usage: /resume <session-id>' }] };
           const session = await r.store.loadSession(command.args[0]!);
+          sessionChoices = [
+            session,
+            ...sessionChoices.filter((candidate) => candidate.id !== session.id),
+          ];
           const pendingPrompts = [...(session.pendingPrompts ?? [])];
           const candidateBackend = await createBackend(r, session);
           const previousBackend = backend;
@@ -747,7 +823,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                     Object.entries(r.config.aliases)
                       .map(([name, model]) => `${name} → ${model}`)
                       .join(', ') || 'none'
-                  }`,
+                  }\nAvailable from ${r.config.provider}: ${providerModels.join(', ') || 'unavailable'}`,
                 },
               ],
             };
@@ -833,6 +909,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
               ...(apiKey ? { apiKey } : {}),
               ...(providerModel ? { model: providerModel } : {}),
             });
+            void refreshProviderModels();
           } catch (error) {
             return {
               messages: [
@@ -882,14 +959,20 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
         }
         if (command.name === 'memory') {
           const [operation, key, ...value] = command.args;
-          if (!operation || operation === 'list')
-            return { messages: [{ text: JSON.stringify(await r.store.getMemory(), null, 2) }] };
+          if (!operation || operation === 'list') {
+            memoryChoices = await r.store.getMemory();
+            return { messages: [{ text: JSON.stringify(memoryChoices, null, 2) }] };
+          }
           if (operation === 'set' && key && value.length) {
             await r.store.setMemory(key, value.join(' '));
+            memoryChoices[key] = value.join(' ');
             return { messages: [{ text: `Saved memory "${key}".` }] };
           }
           if (operation === 'delete' && key) {
+            if (!Object.hasOwn(memoryChoices, key))
+              return { messages: [{ kind: 'error', text: `Memory key not found: ${key}` }] };
             await r.store.deleteMemory(key);
+            delete memoryChoices[key];
             return { messages: [{ text: `Deleted memory "${key}".` }] };
           }
           return {
@@ -947,6 +1030,10 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
             await control.retryQueue();
             return { messages: [{ text: 'Retrying queued prompt.' }] };
           }
+          if (command.args.length && command.args[0] !== 'list')
+            return {
+              messages: [{ kind: 'error', text: 'Usage: /queue [list|clear|retry]' }],
+            };
           const queue = control.scheduler().queue;
           return {
             messages: [
