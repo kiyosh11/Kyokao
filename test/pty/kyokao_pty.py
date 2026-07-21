@@ -199,7 +199,7 @@ def run(binary):
         shell.send("\x15")
 
         checks = [
-            ("/provider ollama", "Active provider changed to ollama; incompatible context was reset."),
+            ("/provider ollama", "Provider ollama is already active."),
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
             ("/resume missing-session", "Error"),
             ("/memory list", "{}"),
@@ -258,6 +258,21 @@ def run(binary):
         before_exit = ANSI.sub("", shell.output[mark:])
         assert "Status" not in before_exit, "usage entered the transcript"
         assert "Session " not in before_exit, "session status appeared after a turn"
+        latest_frame = ANSI.sub("", shell.output[mark:].rsplit("\x1b[H\x1b[2J", 1)[-1])
+        assert not re.search(
+            r"(?m)^│\s*(?:You|Kyokao)\s*│$", latest_frame
+        ), "user or assistant transcript label was rendered"
+        provider_mark = len(shell.output)
+        shell.send("/provider")
+        shell.wait("Providers", provider_mark)
+        shell.wait("pty", provider_mark)
+        shell.wait("active", provider_mark)
+        shell.send("\x1b")
+        time.sleep(0.05)
+        provider_mark = len(shell.output)
+        shell.send("/provider pty\r")
+        shell.wait("Provider pty is already active.", provider_mark)
+        shell.wait("904 tokens · $0.0000 estimated", provider_mark)
         ready_after_turn = len(shell.output)
         shell.wait("Ready", ready_after_turn)
         approval_mark = len(shell.output)
@@ -285,17 +300,20 @@ def run(binary):
         shell.wait("Queue 1", mark)
         shell.resize(30, 79)
         narrow_mark = len(shell.output)
-        shell.send("/theme\r")
-        shell.wait("Active TUI theme:", narrow_mark)
-        shell.wait("github-light", narrow_mark)
+        shell.send("/theme")
+        shell.wait("Themes", narrow_mark)
+        shell.wait("kyokao-dark", narrow_mark)
+        time.sleep(0.05)
+        shell.read()
         narrow_frame = ANSI.sub("", shell.output[narrow_mark:])
-        assert "high-contrast" in narrow_frame
-        assert "github-light" in narrow_frame
+        assert "dracula" in narrow_frame
         theme_mark = len(shell.output)
-        shell.send("/theme solarized-light\r")
+        shell.send("\x1b[B" * 5 + "\r")
         shell.wait("TUI theme changed to solarized-light.", theme_mark)
         shell.wait("Queue 1", theme_mark)
-        shell.send("/theme code github-light\r")
+        shell.send("/theme c\r")
+        shell.wait("Code themes", theme_mark)
+        shell.send("\x1b[B" * 6 + "\r")
         shell.wait("Code theme changed to github-light.", theme_mark)
         shell.wait("Queue 1", theme_mark)
         shell.send("/theme dracla\r")

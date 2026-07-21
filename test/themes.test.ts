@@ -272,15 +272,30 @@ describe('code and Markdown rendering', () => {
         context,
       );
       const reconstructed = transcript
-        .slice(1, -1)
+        .slice(0, -1)
         .map((row) => stripAnsi(row).slice(2))
         .join('');
       expect(reconstructed).toBe(source);
-      expect(transcript.slice(1, -1).every((row) => displayWidth(row) <= terminalWidth - 3)).toBe(
+      expect(transcript.slice(0, -1).every((row) => displayWidth(row) <= terminalWidth - 3)).toBe(
         true,
       );
     },
   );
+
+  it('omits user and assistant names while retaining semantic labels for tools', () => {
+    const transcript = renderTranscript(
+      [
+        { kind: 'user', text: 'Build it' },
+        { kind: 'assistant', text: 'Done' },
+        { kind: 'tool', text: 'write_file: completed' },
+      ],
+      80,
+      context,
+    ).map(stripAnsi);
+    expect(transcript).not.toContain('You');
+    expect(transcript).not.toContain('Kyokao');
+    expect(transcript).toContain('Tool');
+  });
 
   it('hard-wraps oversized tokens without dropping graphemes or adding ellipses', () => {
     const source = `prefix ${'abcdefghij'.repeat(7)} 東京 suffix`;

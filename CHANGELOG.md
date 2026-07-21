@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Removed the `You` and `Kyokao` transcript headers while retaining semantic colors, spacing, tool labels, and lossless wrapping.
+
 ## 0.5.0
 
 - Added immutable, workspace-scoped TUI and code theme registries with eight TUI themes, seven code themes, ANSI 16/256/truecolor negotiation, `NO_COLOR`, configuration/CLI precedence, live `/theme` switching, atomic theme persistence, and `kyokao themes` previews.
