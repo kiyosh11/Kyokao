@@ -200,9 +200,10 @@ def run(binary):
 
         mark = len(shell.output)
         shell.send("/provider ollama\r")
-        shell.wait("API token for ollama", mark)
-        shell.send("\r")
-        shell.wait("Provider ollama is already active; credentials unchanged.", mark)
+        shell.wait("Provider ollama is already active; configuration unchanged.", mark)
+        time.sleep(0.05)
+        shell.read()
+        assert "API token for ollama" not in shell.output[mark:]
 
         checks = [
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
@@ -296,6 +297,12 @@ def run(binary):
         time.sleep(0.05)
         provider_mark = len(shell.output)
         shell.send("/provider pty\r")
+        shell.wait("Provider pty is already active; saved credentials reused.", provider_mark)
+        time.sleep(0.05)
+        shell.read()
+        assert "API token for pty" not in shell.output[provider_mark:]
+        provider_mark = len(shell.output)
+        shell.send("/provider key\r")
         shell.wait("API token for pty", provider_mark)
         shell.send("rotated-test-key")
         time.sleep(0.05)

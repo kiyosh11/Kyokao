@@ -73,7 +73,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.5.3.tgz
+npm install -g ./kyokao-0.5.4.tgz
 kyokao --help
 ```
 
@@ -87,7 +87,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.5.3.tgz
+npm install -g .\kyokao-0.5.4.tgz
 npm uninstall -g kyokao
 ```
 
@@ -132,16 +132,16 @@ The bordered composer remains editable while an agent runs. Enter cancels/stops 
 
 The workspace keeps one local session until `/new`. It streams provider output, tool activity, and tool results into the transcript. The composer border carries the current status, and cumulative token/cost usage appears at the right of the shortcut footer when space permits. On exit, the restored shell receives a resumable session command; `/new` clears that hint. Usage is returned or calculated by the existing agent and does not claim hidden reasoning or exact provider billing.
 
-| Slash command                                         | Purpose                                                                                                                                                |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/help [command]`                                     | Show command help and argument syntax.                                                                                                                 |
-| `/new`, `/clear`, `/exit`                             | Start a new session, clear visible output, or leave the workspace.                                                                                     |
-| `/sessions`, `/resume <id>`                           | List or resume local sessions.                                                                                                                         |
-| `/model [id]`, `/provider [name]`, `/approval [mode]` | Inspect or change the active runtime setting. Provider/model changes apply to later requests; approval accepts `suggest`, `auto-edit`, or `full-auto`. |
-| `/memory [list\|set <key> <value>\|delete <key>]`     | Inspect or manage local memory.                                                                                                                        |
-| `/doctor`, `/diff`                                    | Run setup diagnostics or show the workspace diff.                                                                                                      |
-| `/queue [clear\|retry]`, `/capy`                      | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                     |
-| `/theme [name\|code <name>\|save]`                    | Preview or immediately switch TUI/code themes; explicitly save both choices globally.                                                                  |
+| Slash command                                              | Purpose                                                                                                                                                                                                              |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help [command]`                                          | Show command help and argument syntax.                                                                                                                                                                               |
+| `/new`, `/clear`, `/exit`                                  | Start a new session, clear visible output, or leave the workspace.                                                                                                                                                   |
+| `/sessions`, `/resume <id>`                                | List or resume local sessions.                                                                                                                                                                                       |
+| `/model [id]`, `/provider [name\|key]`, `/approval [mode]` | Inspect or change the active runtime setting. Provider selection reuses saved credentials; `/provider key` explicitly replaces the active provider's token. Approval accepts `suggest`, `auto-edit`, or `full-auto`. |
+| `/memory [list\|set <key> <value>\|delete <key>]`          | Inspect or manage local memory.                                                                                                                                                                                      |
+| `/doctor`, `/diff`                                         | Run setup diagnostics or show the workspace diff.                                                                                                                                                                    |
+| `/queue [clear\|retry]`, `/capy`                           | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                                                                                   |
+| `/theme [name\|code <name>\|save]`                         | Preview or immediately switch TUI/code themes; explicitly save both choices globally.                                                                                                                                |
 
 Finite choices open as arrow-selectable drop-ups inside the composer. `/help` browses command help, `/model` includes fetched provider models and aliases, `/resume` shows saved sessions, and `/memory delete` shows existing keys. Provider rows show only provider names; selecting one opens masked token entry in the same composer. Enter saves the token to the user’s global Kyokao config and applies the provider, while Escape cancels. Token text is never rendered, added to prompt history, or written to the transcript.
 
@@ -496,8 +496,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.5.3
-git push origin v0.5.3
+git tag v0.5.4
+git push origin v0.5.4
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -507,7 +507,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.5.3.tgz
+TARBALL=kyokao-0.5.4.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -519,7 +519,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.5.3.tgz'
+$tarball = '.\kyokao-0.5.4.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help

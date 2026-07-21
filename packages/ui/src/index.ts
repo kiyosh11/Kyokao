@@ -78,8 +78,8 @@ export const workspaceCommands: readonly CommandDefinition[] = [
   { name: 'model', syntax: '/model [id]', description: 'Show or change the active model' },
   {
     name: 'provider',
-    syntax: '/provider [name]',
-    description: 'Show or change the active provider',
+    syntax: '/provider [name|key]',
+    description: 'Show or change the active provider or replace its saved key',
   },
   {
     name: 'approval',
