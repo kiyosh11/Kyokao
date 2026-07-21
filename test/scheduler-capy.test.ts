@@ -168,6 +168,24 @@ describe('prompt scheduler', () => {
     expect(resets).toBe(1);
   });
 
+  it('keeps running when queue persistence fails', async () => {
+    const backend = new ControlledBackend();
+    const errors: string[] = [];
+    const scheduler = new PromptScheduler({
+      backend,
+      emit: (kind, value) => kind === 'error' && errors.push(String(value)),
+      onQueueChange: async () => {
+        throw Object.assign(new Error('session file is locked'), { code: 'EPERM' });
+      },
+    });
+    await scheduler.submit('continue working');
+    await tick();
+    expect(backend.runs).toEqual(['continue working']);
+    expect(errors).toContain('Unable to save queued prompts: session file is locked');
+    backend.releases.at(-1)!();
+    await scheduler.waitForIdle();
+  });
+
   it('keeps failed prompts retryable and never starts two runs', async () => {
     const backend = new ControlledBackend();
     backend.fail.add('bad');

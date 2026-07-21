@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.5
+
+- Fixed Windows `EPERM` crashes while replacing existing session files by retrying through a safe copy fallback, cleaning temporary files, and keeping the prompt scheduler alive when autosave fails.
+
 ## 0.5.4
 
 - Reused saved or environment provider credentials when selecting providers; API-token entry now opens only when credentials are missing or the explicit `/provider key` action is selected.
