@@ -337,6 +337,7 @@ export interface TerminalWorkspaceOptions {
   header: () => WorkspaceHeader;
   backend?: PromptBackend;
   onQueueChange?: (queue: readonly string[]) => Promise<void> | void;
+  commandPalette?: (value: string) => CommandDefinition[] | undefined;
   onApprovalHandler?: (approve: (action: string, detail: string) => Promise<boolean>) => void;
   onPrompt?: (
     prompt: string,
@@ -375,6 +376,7 @@ export interface WorkspaceRenderState {
   usage?: WorkspaceUsage;
   scheduler?: SchedulerState;
   themeContext?: ThemeContext;
+  paletteCommands?: CommandDefinition[];
 }
 
 function border(width: number, left: string, right: string, label = ''): string {
@@ -412,9 +414,10 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
   const height = Math.max(8, state.height);
   const inner = width - 2;
   const matches =
-    state.editor.text.startsWith('/') && state.busyKind !== 'command'
+    state.paletteCommands ??
+    (state.editor.text.startsWith('/') && state.busyKind !== 'command'
       ? filterWorkspaceCommands(state.editor.text, context)
-      : [];
+      : []);
   const paletteIndex = selectPalette(state.paletteIndex ?? 0, 0, matches.length);
   const editorLayout = layoutEditor(state.editor.text, state.editor.cursor, Math.max(1, inner - 1));
   const queued = state.scheduler?.queue ?? [];
@@ -470,11 +473,21 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
     ...transcriptRows,
   ];
   if (paletteRows) {
-    const paletteLabel = /^\/theme\s+code(?:\s|$)/i.test(state.editor.text)
-      ? 'Code themes'
-      : /^\/theme(?:\s|$)/i.test(state.editor.text)
-        ? 'Themes'
-        : 'Commands';
+    const commandLabels: Partial<Record<WorkspaceCommand, string>> = {
+      provider: 'Providers',
+      model: 'Models',
+      approval: 'Approval modes',
+      memory: 'Memory',
+      queue: 'Queue actions',
+    };
+    const paletteCommand = matches[0]?.name;
+    const paletteLabel =
+      (paletteCommand ? commandLabels[paletteCommand] : undefined) ??
+      (/^\/theme\s+code(?:\s|$)/i.test(state.editor.text)
+        ? 'Code themes'
+        : /^\/theme(?:\s|$)/i.test(state.editor.text)
+          ? 'Themes'
+          : 'Commands');
     lines.push(context.tui('border', border(width, '├', '┤', paletteLabel)));
     for (const [index, item] of paletteWindow.commands.entries()) {
       const absoluteIndex = paletteWindow.start + index;
@@ -652,7 +665,7 @@ async function runTerminalWorkspace(
   };
   const palette = () =>
     editor.text.startsWith('/') && busyKind !== 'command'
-      ? filterWorkspaceCommands(editor.text, context)
+      ? (options.commandPalette?.(editor.text) ?? filterWorkspaceCommands(editor.text, context))
       : [];
   const draw = () => {
     if (closed) return;
@@ -675,6 +688,7 @@ async function runTerminalWorkspace(
       usage,
       scheduler: schedulerState,
       themeContext: context,
+      paletteCommands: matches,
     });
     const maxScroll = Math.max(0, rendered.length - frame.transcriptHeight);
     scrollOffset = Math.min(scrollOffset, maxScroll);
@@ -694,6 +708,7 @@ async function runTerminalWorkspace(
         usage,
         scheduler: schedulerState,
         themeContext: context,
+        paletteCommands: matches,
       });
     screen.draw(frame);
   };

@@ -199,7 +199,7 @@ def run(binary):
         shell.send("\x15")
 
         checks = [
-            ("/provider ollama", "Active provider changed to ollama; incompatible context was reset."),
+            ("/provider ollama", "Provider ollama is already active."),
             ("/approval auto-edit", "Approval mode changed to auto-edit."),
             ("/resume missing-session", "Error"),
             ("/memory list", "{}"),
@@ -262,6 +262,17 @@ def run(binary):
         assert not re.search(
             r"(?m)^│\s*(?:You|Kyokao)\s*│$", latest_frame
         ), "user or assistant transcript label was rendered"
+        provider_mark = len(shell.output)
+        shell.send("/provider")
+        shell.wait("Providers", provider_mark)
+        shell.wait("pty", provider_mark)
+        shell.wait("active", provider_mark)
+        shell.send("\x1b")
+        time.sleep(0.05)
+        provider_mark = len(shell.output)
+        shell.send("/provider pty\r")
+        shell.wait("Provider pty is already active.", provider_mark)
+        shell.wait("904 tokens · $0.0000 estimated", provider_mark)
         ready_after_turn = len(shell.output)
         shell.wait("Ready", ready_after_turn)
         approval_mark = len(shell.output)
@@ -292,6 +303,8 @@ def run(binary):
         shell.send("/theme")
         shell.wait("Themes", narrow_mark)
         shell.wait("kyokao-dark", narrow_mark)
+        time.sleep(0.05)
+        shell.read()
         narrow_frame = ANSI.sub("", shell.output[narrow_mark:])
         assert "dracula" in narrow_frame
         theme_mark = len(shell.output)

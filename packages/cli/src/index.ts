@@ -44,6 +44,7 @@ import {
   createUi,
   MarkdownStreamRenderer,
   workspaceCommands,
+  type CommandDefinition,
   type InteractiveScreen,
   type WorkspaceEmit,
   type ThemeContext,
@@ -435,6 +436,30 @@ function invalidThemeMessage(kind: 'TUI' | 'code', value: string): string {
   return `Unknown ${kind} theme "${value}". Did you mean: ${suggestName(value, names).join(', ')}?`;
 }
 
+function choicePalette(
+  value: string,
+  command: CommandDefinition['name'],
+  choices: Array<{
+    value: string;
+    description: string;
+    completion?: string;
+    submit?: boolean;
+  }>,
+): CommandDefinition[] | undefined {
+  const match = value.match(new RegExp(`^/${command}(?:\\s+(.*))?$`, 'i'));
+  if (!match) return undefined;
+  const query = (match[1] ?? '').trimStart().toLowerCase();
+  return choices
+    .filter((choice) => choice.value.toLowerCase().startsWith(query))
+    .map((choice) => ({
+      name: command,
+      syntax: `/${command} ${choice.value}`,
+      description: choice.description,
+      completion: choice.completion ?? `/${command} ${choice.value}`,
+      submit: choice.submit ?? true,
+    }));
+}
+
 async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
   const options = program.opts();
   const themeContext = createThemeContext({
@@ -513,6 +538,79 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
         if (!session) return;
         session.pendingPrompts = [...queue];
         await r.store.saveSession(session);
+      },
+      commandPalette: (value) => {
+        const providers = [
+          ...new Set([...Object.keys(providerPresets), ...Object.keys(r.config.providers)]),
+        ]
+          .sort((left, right) => {
+            if (left === r.config.provider) return -1;
+            if (right === r.config.provider) return 1;
+            return left.localeCompare(right);
+          })
+          .map((name) => {
+            const preset = providerPresets[name];
+            const configured = r.config.providers[name];
+            const local = ['ollama', 'lmstudio', 'vllm'].includes(name);
+            const kind = preset?.remote ? 'remote agent' : local ? 'local' : 'OpenAI-compatible';
+            const readiness =
+              configured || local || (preset && process.env[preset.env])
+                ? 'configured'
+                : 'needs credentials';
+            return {
+              value: name,
+              description: `${name === r.config.provider ? 'active · ' : ''}${kind} · ${readiness}`,
+            };
+          });
+        return (
+          choicePalette(value, 'provider', providers) ??
+          choicePalette(value, 'model', [
+            {
+              value: r.config.model,
+              description: 'active model',
+            },
+            ...Object.entries(r.config.aliases)
+              .filter(([name]) => name !== r.config.model)
+              .map(([name, model]) => ({
+                value: name,
+                description: `alias → ${model}`,
+              })),
+          ]) ??
+          choicePalette(value, 'approval', [
+            {
+              value: 'suggest',
+              description: `${r.config.approval === 'suggest' ? 'active · ' : ''}ask before edits and commands`,
+            },
+            {
+              value: 'auto-edit',
+              description: `${r.config.approval === 'auto-edit' ? 'active · ' : ''}allow file edits; ask before commands`,
+            },
+            {
+              value: 'full-auto',
+              description: `${r.config.approval === 'full-auto' ? 'active · ' : ''}allow edits and commands`,
+            },
+          ]) ??
+          choicePalette(value, 'memory', [
+            { value: 'list', description: 'show saved memory' },
+            {
+              value: 'set',
+              description: 'save a key and value',
+              completion: '/memory set ',
+              submit: false,
+            },
+            {
+              value: 'delete',
+              description: 'delete a saved key',
+              completion: '/memory delete ',
+              submit: false,
+            },
+          ]) ??
+          choicePalette(value, 'queue', [
+            { value: 'list', description: 'show queued prompts' },
+            { value: 'clear', description: 'remove all queued prompts' },
+            { value: 'retry', description: 'retry after a queue error' },
+          ])
+        );
       },
       header: () => ({
         workspace:
@@ -637,7 +735,20 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           return { messages: [{ text: `Resumed session ${session.id}.` }] };
         }
         if (command.name === 'model') {
-          if (!arg) return { messages: [{ text: `Active model: ${r.config.model}` }] };
+          if (!arg)
+            return {
+              messages: [
+                {
+                  text: `Active model: ${r.config.model}\nConfigured aliases: ${
+                    Object.entries(r.config.aliases)
+                      .map(([name, model]) => `${name} → ${model}`)
+                      .join(', ') || 'none'
+                  }`,
+                },
+              ],
+            };
+          if (arg === r.config.model)
+            return { messages: [{ text: `Model ${arg} is already active.` }] };
           await replaceRuntime(
             { model: arg },
             {
@@ -649,10 +760,25 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
           };
         }
         if (command.name === 'provider') {
-          if (!arg) return { messages: [{ text: `Active provider: ${r.config.provider}` }] };
+          if (!arg)
+            return {
+              messages: [
+                {
+                  text: `Active provider: ${r.config.provider}\nAvailable: ${[
+                    ...new Set([
+                      ...Object.keys(providerPresets),
+                      ...Object.keys(r.config.providers),
+                    ]),
+                  ].join(', ')}`,
+                },
+              ],
+            };
+          if (arg === r.config.provider)
+            return { messages: [{ text: `Provider ${arg} is already active.` }] };
           try {
+            const providerModel = r.config.providers[arg]?.model;
             await replaceRuntime(
-              { provider: arg },
+              { provider: arg, ...(providerModel ? { model: providerModel } : {}) },
               {
                 beforeSwap: () => control.reset(),
               },
@@ -692,6 +818,8 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
                 },
               ],
             };
+          if (arg === r.config.approval)
+            return { messages: [{ text: `Approval mode ${arg} is already active.` }] };
           await replaceRuntime(
             { approval: arg as KyokaoConfig['approval'] },
             { preserveCompatibleSession: true },

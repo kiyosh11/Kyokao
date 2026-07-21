@@ -156,6 +156,19 @@ describe('terminal workspace helpers', () => {
         codeTheme: 'kyokao',
         colorLevel: 0,
       }),
+      commandPalette(value) {
+        if (!/^\/provider(?:\s|$)/.test(value)) return undefined;
+        const query = value.replace(/^\/provider\s*/, '');
+        return ['openai', 'custom']
+          .filter((name) => name.startsWith(query))
+          .map((name) => ({
+            name: 'provider',
+            syntax: `/provider ${name}`,
+            description: name === 'openai' ? 'active · built-in' : 'configured',
+            completion: `/provider ${name}`,
+            submit: true,
+          }));
+      },
       header: () => ({
         workspace: '~',
         provider: 'fake',
@@ -184,6 +197,13 @@ describe('terminal workspace helpers', () => {
     input.send('\x1b[B\r');
     await tick();
     expect(commands).toContain('/theme code dracula');
+
+    input.send('/provider');
+    await tick();
+    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Providers');
+    input.send('\x1b[B\r');
+    await tick();
+    expect(commands).toContain('/provider custom');
 
     input.send('/exit\r');
     await done;
