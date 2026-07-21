@@ -209,7 +209,8 @@ describe('terminal workspace helpers', () => {
     expect(plain(output.text)).toContain('Queue 1');
     expect(plain(output.text)).toContain('Ctrl+Enter queue');
     const queuedFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
-    expect(queuedFrame.split('\n').filter((line) => /\bYou\b/.test(line))).toHaveLength(1);
+    expect(queuedFrame.split('\n').some((line) => /^\s*│\s*You\s*│/.test(line))).toBe(false);
+    expect(queuedFrame.split('\n').some((line) => /^\s*│\s*Kyokao\s*│/.test(line))).toBe(false);
     expect(queuedFrame).toContain('started first');
     expect(queuedFrame).not.toContain('started queued');
     input.send('replacement\r');

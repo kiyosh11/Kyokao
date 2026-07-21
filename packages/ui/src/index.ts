@@ -224,9 +224,9 @@ export function renderTranscript(
   return entries.flatMap((entry) => {
     const label =
       entry.kind === 'user'
-        ? context.tui('user', 'You')
+        ? undefined
         : entry.kind === 'assistant'
-          ? context.tui('assistant', 'Kyokao')
+          ? undefined
           : entry.kind === 'tool'
             ? context.tui('tool', 'Tool')
             : entry.kind === 'error'
@@ -242,7 +242,7 @@ export function renderTranscript(
             : 'primary';
     const rendered = markdown.render(entry.text);
     return [
-      `${label}`,
+      ...(label ? [label] : []),
       ...wrapWorkspaceText(rendered, contentWidth).map((line) => `  ${context.tui(token, line)}`),
       '',
     ];

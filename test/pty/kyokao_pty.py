@@ -258,6 +258,10 @@ def run(binary):
         before_exit = ANSI.sub("", shell.output[mark:])
         assert "Status" not in before_exit, "usage entered the transcript"
         assert "Session " not in before_exit, "session status appeared after a turn"
+        latest_frame = ANSI.sub("", shell.output[mark:].rsplit("\x1b[H\x1b[2J", 1)[-1])
+        assert not re.search(
+            r"(?m)^│\s*(?:You|Kyokao)\s*│$", latest_frame
+        ), "user or assistant transcript label was rendered"
         ready_after_turn = len(shell.output)
         shell.wait("Ready", ready_after_turn)
         approval_mark = len(shell.output)
