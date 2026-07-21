@@ -232,7 +232,7 @@ describe('terminal workspace helpers', () => {
     await done;
   });
 
-  it('cancels an active request before exiting and rejects non-TTY startup', async () => {
+  it('cancels an active request with Escape before Ctrl-C exits and rejects non-TTY startup', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     let aborted = false;
@@ -254,7 +254,8 @@ describe('terminal workspace helpers', () => {
     input.send('wait');
     input.send('\r');
     await tick();
-    input.send('\u0003');
+    input.send('\u001b');
+    await new Promise((resolve) => setTimeout(resolve, 35));
     await tick();
     expect(aborted).toBe(true);
     input.send('\u0003');

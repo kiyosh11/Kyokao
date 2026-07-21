@@ -3,6 +3,7 @@
 ## 0.5.4
 
 - Reused saved or environment provider credentials when selecting providers; API-token entry now opens only when credentials are missing or the explicit `/provider key` action is selected.
+- Made Escape cancel an active model request while Ctrl-C exits the interactive workspace.
 
 ## 0.5.3
 

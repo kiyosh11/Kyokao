@@ -399,7 +399,7 @@ export function formatWorkspaceUsage(usage: WorkspaceUsage): string {
 
 export function renderWorkspaceFooter(width: number, usage?: WorkspaceUsage, busy = false): string {
   const hint = busy
-    ? 'Enter replace · Shift/Alt+Enter newline · Ctrl+Enter queue'
+    ? 'Enter replace · Shift/Alt+Enter newline · Ctrl+Enter queue · Esc cancel · ^C exit'
     : 'Enter submit · Shift/Alt newline · Ctrl+Enter queue · ^C exit';
   const usageText = usage ? formatWorkspaceUsage(usage) : '';
   if (usageText && displayWidth(hint) + displayWidth(usageText) + 2 <= width) {
@@ -468,7 +468,7 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
             : state.busy
               ? state.busyKind === 'command'
                 ? `Running command ${['·', '••', '•••'][state.animationFrame ?? 0]} · input disabled`
-                : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Ctrl-C cancels`
+                : `Working ${['·', '••', '•••'][state.animationFrame ?? 0]} · Esc cancels`
               : scrollOffset
                 ? `Viewing earlier output (${scrollOffset} lines) · End returns`
                 : 'Ready';
@@ -837,14 +837,14 @@ async function runTerminalWorkspace(
           return;
         }
         if (event.type === 'key' && event.key === 'interrupt') {
-          if (busyKind === 'prompt') void scheduler.cancelActive();
-          else if (busyKind === 'command')
-            emit('status', 'Command is running and cannot be cancelled.');
+          if (busyKind === 'command') emit('status', 'Command is running and cannot be cancelled.');
           else resolve();
           return;
         }
         if (event.type === 'key' && event.key === 'escape') {
-          if (editor.text.startsWith('/')) {
+          if (busyKind === 'prompt') {
+            void scheduler.cancelActive();
+          } else if (editor.text.startsWith('/')) {
             editor.set('');
             paletteIndex = 0;
             draw();
