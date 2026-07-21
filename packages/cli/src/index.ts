@@ -12,6 +12,7 @@ import {
   globalConfigPath,
   mergeProviderSetup,
   effectiveSetupApiKey,
+  saveGlobalThemes,
   type KyokaoConfig,
 } from '@kyokao/config';
 import {
@@ -39,16 +40,26 @@ import {
   setupWizard,
   terminalWorkspace,
   withInteractiveScreen,
-  ui,
+  createThemeContext,
+  createUi,
+  MarkdownStreamRenderer,
   workspaceCommands,
   type InteractiveScreen,
   type WorkspaceEmit,
+  type ThemeContext,
 } from '@kyokao/ui';
+import {
+  CODE_THEME_NAMES,
+  TUI_THEME_NAMES,
+  isCodeThemeName,
+  isTuiThemeName,
+  suggestName,
+} from '@kyokao/themes';
 const program = new Command();
 program
   .name('kyokao')
   .description('Kyokao: local and Capy remote coding agents')
-  .version('0.4.0')
+  .version('0.5.0')
   .option('-m, --model <id>', 'model ID or configured alias')
   .option('-p, --provider <name>', 'provider preset or configured provider')
   .option('--base-url <url>', 'override provider base URL')
@@ -69,9 +80,14 @@ program
   .option('--allow-host <hosts>', 'comma-separated HTTP host allowlist')
   .option('--skip-model-check', 'skip provider model availability validation')
   .option('--editor <command>', 'editor command for the edit command');
+program
+  .option('--theme <name>', 'TUI theme')
+  .option('--code-theme <name>', 'code and Markdown theme');
 function cliConfig(): Partial<KyokaoConfig> {
   const o = program.opts();
   return {
+    theme: o.theme,
+    codeTheme: o.codeTheme,
     provider: o.provider,
     model: o.model,
     approval: o.approval,
@@ -119,7 +135,11 @@ async function needsProviderSetup(): Promise<boolean> {
   return !global.provider && !local.provider && !process.env.KYOKAO_PROVIDER;
 }
 
-async function setupProvider(confirmReplace = false, screen?: InteractiveScreen): Promise<boolean> {
+async function setupProvider(
+  confirmReplace = false,
+  screen?: InteractiveScreen,
+  themeContext?: ThemeContext,
+): Promise<boolean> {
   const saved = await readConfig(globalConfigPath());
   const localNames = new Set(['ollama', 'lmstudio', 'vllm']);
   const providers = [
@@ -151,6 +171,7 @@ async function setupProvider(confirmReplace = false, screen?: InteractiveScreen)
     configPath: globalConfigPath(),
     confirmReplace,
     screen,
+    themeContext,
     keySource: (provider) =>
       provider.local
         ? 'local'
@@ -207,7 +228,7 @@ async function setupProvider(confirmReplace = false, screen?: InteractiveScreen)
 
 async function runtime(
   overrides: Partial<KyokaoConfig> = {},
-  approve: (action: string, detail: string) => Promise<boolean> = ui.approve,
+  approve?: (action: string, detail: string) => Promise<boolean>,
 ) {
   const loaded = await loadConfig({ cli: cliConfig(), profile: program.opts().profile });
   const config: KyokaoConfig = {
@@ -217,14 +238,26 @@ async function runtime(
     providers: { ...loaded.providers, ...(overrides.providers ?? {}) },
   };
   const p = resolveProvider(config);
+  const themeContext = createThemeContext({
+    tuiTheme: config.theme,
+    codeTheme: config.codeTheme,
+    isTTY: process.stdout.isTTY,
+    env: process.env,
+  });
+  const renderer = createUi(themeContext);
   const root = process.cwd();
   const store = new LocalStore(join(root, '.kyokao'));
-  const core = new CoreTools(new WorkspaceSandbox(root), config.approval, approve, {
-    maxShellTimeoutMs: config.limits.maxShellTimeoutMs,
-    maxOutputChars: config.limits.maxOutputChars,
-    maxFileBytes: config.limits.maxFileBytes,
-    allowedHosts: config.limits.allowedHosts,
-  });
+  const core = new CoreTools(
+    new WorkspaceSandbox(root),
+    config.approval,
+    approve ?? renderer.approve,
+    {
+      maxShellTimeoutMs: config.limits.maxShellTimeoutMs,
+      maxOutputChars: config.limits.maxOutputChars,
+      maxFileBytes: config.limits.maxFileBytes,
+      allowedHosts: config.limits.allowedHosts,
+    },
+  );
   const plugins = await loadPlugins(config.plugins, root);
   const mcp = await connectMcp(config.mcp, root);
   const tools = new CompositeTools([core, ...plugins, ...(mcp ? [mcp] : [])]);
@@ -241,6 +274,8 @@ async function runtime(
     root,
     core,
     instructions: await loadInstructionFiles(root),
+    renderer,
+    themeContext,
   };
 }
 async function runPrompt(
@@ -254,26 +289,34 @@ async function runPrompt(
   const controller = new AbortController();
   const backend = await createBackend(r, existing);
   let streamed = '';
+  const assistantStream = render ? new MarkdownStreamRenderer(r.themeContext) : undefined;
+  let assistantStreamEnded = false;
+  const finishAssistantStream = () => {
+    if (!assistantStream || assistantStreamEnded) return;
+    process.stdout.write(assistantStream.end());
+    if (streamed && !streamed.endsWith('\n')) process.stdout.write('\n');
+    assistantStreamEnded = true;
+  };
   const emit: BackendEmit = (kind, value) => {
     if (kind === 'assistant') {
       streamed += String(value);
       events?.('assistant', String(value));
-      if (render) process.stdout.write(String(value));
+      if (assistantStream) process.stdout.write(assistantStream.write(String(value)));
     } else if (kind === 'tool') {
       events?.('tool', String(value));
-      if (render) ui.tool(String(value));
+      if (render) r.renderer.tool(String(value));
     } else if (kind === 'usage') {
       events?.('usage', value as any);
       const usage = value as { totalTokens?: number; estimatedCostUsd?: number } | undefined;
       if (render && usage)
-        ui.info(
+        r.renderer.info(
           `${(usage.totalTokens ?? 0).toLocaleString()} tokens · $${(
             usage.estimatedCostUsd ?? 0
           ).toFixed(4)} estimated`,
         );
     } else {
       events?.(kind === 'error' ? 'error' : 'status', String(value));
-      if (render) (kind === 'error' ? ui.error : ui.info)(String(value));
+      if (render) (kind === 'error' ? r.renderer.error : r.renderer.info)(String(value));
     }
   };
   const onInterrupt = () => {
@@ -283,20 +326,22 @@ async function runPrompt(
   try {
     const activeSignal = signal ?? controller.signal;
     await backend.run(prompt, emit, activeSignal);
+    finishAssistantStream();
     const session = backend.session();
     if (!session) throw new Error('Backend completed without a session');
     const status = `Session ${session.id} (${session.checkpoint})`;
-    if (render) ui.info(status);
+    if (render) r.renderer.info(status);
     return render ? session : Object.assign(session, { __answer: streamed });
   } catch (error) {
     if (controller.signal.aborted || signal?.aborted) {
       const status = 'Interrupted; session state was saved at the last completed tool checkpoint.';
-      if (render) ui.error(status);
+      if (render) r.renderer.error(status);
       else events?.('status', status);
       return backend.session() ?? existing;
     }
     throw error;
   } finally {
+    finishAssistantStream();
     process.removeListener('SIGINT', onInterrupt);
     await backend.close();
   }
@@ -371,11 +416,40 @@ async function ask(prompt: string, sessionId?: string) {
     await r.tools.close?.();
   }
 }
+function themeSummary(context: ThemeContext): string {
+  return [
+    `Active TUI theme: ${context.names.tui}`,
+    `Active code theme: ${context.names.code}`,
+    `TUI themes: ${TUI_THEME_NAMES.join(', ')}`,
+    `Code themes: ${CODE_THEME_NAMES.join(', ')}`,
+    '',
+    'Preview: brand · user · assistant · tool · error · selected',
+    '```ts',
+    'const theme: Theme = { readable: true };',
+    '```',
+  ].join('\n');
+}
+
+function invalidThemeMessage(kind: 'TUI' | 'code', value: string): string {
+  const names = kind === 'TUI' ? TUI_THEME_NAMES : CODE_THEME_NAMES;
+  return `Unknown ${kind} theme "${value}". Did you mean: ${suggestName(value, names).join(', ')}?`;
+}
+
 async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
-  if (needsSetup && !(await setupProvider(false, screen))) return;
-  let requestApproval: (action: string, detail: string) => Promise<boolean> = ui.approve;
+  const options = program.opts();
+  const themeContext = createThemeContext({
+    tuiTheme: options.theme ?? process.env.KYOKAO_THEME,
+    codeTheme: options.codeTheme ?? process.env.KYOKAO_CODE_THEME,
+    isTTY: screen.output.isTTY,
+    env: process.env,
+  });
+  if (needsSetup && !(await setupProvider(false, screen, themeContext))) return;
+  let requestApproval: (action: string, detail: string) => Promise<boolean> =
+    createUi(themeContext).approve;
   const approve = (action: string, detail: string) => requestApproval(action, detail);
   let r = await runtime({}, approve);
+  themeContext.setTuiTheme(r.config.theme);
+  themeContext.setCodeTheme(r.config.codeTheme);
   let backend = await createBackend(r);
   const backendProxy: PromptBackend = {
     get provider() {
@@ -429,6 +503,7 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
   try {
     await terminalWorkspace({
       screen,
+      themeContext,
       backend: backendProxy,
       onApprovalHandler: (handler) => {
         requestApproval = handler;
@@ -451,6 +526,44 @@ async function runTui(screen: InteractiveScreen, needsSetup: boolean) {
       onCommand: async (command, emit, control) => {
         const arg = command.args.join(' ');
         if (!command.name) return { messages: [{ kind: 'error', text: 'Unknown command.' }] };
+        if (command.name === 'theme') {
+          const [operation, value] = command.args;
+          if (!operation) return { messages: [{ text: themeSummary(themeContext) }] };
+          if (operation === 'save') {
+            if (command.args.length !== 1)
+              return { messages: [{ kind: 'error', text: 'Usage: /theme save' }] };
+            await saveGlobalThemes(themeContext.names.tui, themeContext.names.code);
+            return {
+              messages: [
+                {
+                  text: `Saved TUI theme ${themeContext.names.tui} and code theme ${themeContext.names.code}.`,
+                },
+              ],
+            };
+          }
+          if (operation === 'code') {
+            if (!value)
+              return {
+                messages: [
+                  {
+                    text: `Active code theme: ${themeContext.names.code}\nAvailable: ${CODE_THEME_NAMES.join(', ')}`,
+                  },
+                ],
+              };
+            if (!isCodeThemeName(value))
+              return { messages: [{ kind: 'error', text: invalidThemeMessage('code', value) }] };
+            themeContext.setCodeTheme(value);
+            r.config.codeTheme = value;
+            return { messages: [{ text: `Code theme changed to ${value}.` }] };
+          }
+          if (!isTuiThemeName(operation))
+            return {
+              messages: [{ kind: 'error', text: invalidThemeMessage('TUI', operation) }],
+            };
+          themeContext.setTuiTheme(operation);
+          r.config.theme = operation;
+          return { messages: [{ text: `TUI theme changed to ${operation}.` }] };
+        }
         if (command.name === 'exit') {
           const state = control.scheduler();
           if (state.active || state.queue.length)
@@ -817,6 +930,45 @@ program
   .action(() => {
     for (const [name, p] of Object.entries(providerPresets)) console.log(`${name}\t${p.baseURL}`);
   });
+program
+  .command('themes')
+  .description('List built-in TUI and code themes')
+  .action(async () => {
+    const config = await loadConfig({
+      cli: cliConfig(),
+      profile: program.opts().profile,
+    });
+    const active = createThemeContext({
+      tuiTheme: config.theme,
+      codeTheme: config.codeTheme,
+      isTTY: process.stdout.isTTY,
+      env: process.env,
+    });
+    console.log('TUI themes');
+    for (const name of TUI_THEME_NAMES) {
+      const preview = createThemeContext({
+        tuiTheme: name,
+        codeTheme: config.codeTheme,
+        colorLevel: active.colorLevel,
+      });
+      const mark = name === config.theme ? '*' : ' ';
+      console.log(
+        `${mark} ${preview.tui('brand', '◆')} ${preview.tui('user', 'user')} ${preview.tui('assistant', 'assistant')} ${preview.tui('tool', 'tool')} ${preview.tui('error', 'error')} ${preview.tui('selected', name)}`,
+      );
+    }
+    console.log('\nCode themes');
+    for (const name of CODE_THEME_NAMES) {
+      const preview = createThemeContext({
+        tuiTheme: config.theme,
+        codeTheme: name,
+        colorLevel: active.colorLevel,
+      });
+      const mark = name === config.codeTheme ? '*' : ' ';
+      console.log(
+        `${mark} ${name}  ${preview.code('keyword', 'const')} ${preview.code('property', 'answer')} ${preview.code('punctuation', ' = ')}${preview.code('number', '42')}${preview.code('punctuation', ';')} ${preview.code('comment', '// sample')}`,
+      );
+    }
+  });
 const config = program.command('config').description('Inspect or manage non-secret configuration');
 config
   .command('show')
@@ -901,8 +1053,12 @@ program
   .description('Show working-tree diff')
   .action(async () => {
     const r = await runtime();
-    const v = await r.tools.execute('git', { args: ['diff', '--no-ext-diff'] });
-    ui.diff(v.content);
+    try {
+      const v = await r.tools.execute('git', { args: ['diff', '--no-ext-diff'] });
+      r.renderer.diff(v.content);
+    } finally {
+      await r.tools.close?.();
+    }
   });
 for (const [name, instruction] of Object.entries({
   commit:
@@ -918,6 +1074,6 @@ for (const [name, instruction] of Object.entries({
       await ask(`${instruction}${p.length ? `\nUser context: ${p.join(' ')}` : ''}`);
     });
 program.parseAsync().catch((e) => {
-  ui.error(e.message);
+  createUi().error(e.message);
   process.exitCode = 1;
 });

@@ -9,7 +9,7 @@ import {
   type InputEvent,
 } from './editor.js';
 import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
-import { theme } from './theme.js';
+import { createThemeContext, type ThemeContext } from './theme.js';
 
 export type SetupStep =
   'confirm' | 'provider' | 'name' | 'url' | 'key' | 'model' | 'project' | 'approval' | 'review';
@@ -52,6 +52,7 @@ export interface SetupWizardOptions {
   }) => Promise<Array<{ id: string; name: string; description?: string }>>;
   confirmReplace?: boolean;
   screen?: InteractiveScreen;
+  themeContext?: ThemeContext;
 }
 export const approvalChoices = [
   { value: 'suggest', description: 'Propose changes; ask before every edit or command.' },
@@ -119,7 +120,9 @@ export function renderSetupFrame(input: {
   message?: string;
   review?: string[];
   busy?: boolean;
+  themeContext?: ThemeContext;
 }): ScreenFrame {
+  const context = input.themeContext ?? createThemeContext({ colorLevel: 0 });
   const width = Math.max(12, input.width);
   const inner = width - 4;
   const height = Math.max(8, input.height ?? 28);
@@ -127,16 +130,20 @@ export function renderSetupFrame(input: {
   const rows = [...setupWordmark(width - 4), '', input.title];
   if (input.items) {
     const window = visibleSetupItems(input.items, input.selected ?? 0, height, rows.length + 6);
-    if (window.before) rows.push(theme.muted('  ↑ more'));
+    if (window.before) rows.push(context.tui('muted', '  ↑ more'));
     window.items.forEach((item, offset) => {
       const index = window.start + offset;
       const nameWidth = Math.max(4, Math.min(inner - 2, Math.floor(inner * 0.42)));
       const text = `${index === input.selected ? '›' : ' '} ${padDisplay(item.name, nameWidth)}${item.description ? ` — ${fit(item.description, Math.max(1, inner - nameWidth - 5))}` : ''}`;
       rows.push(
-        item.danger ? theme.error(text) : index === input.selected ? theme.user(text) : text,
+        item.danger
+          ? context.tui('error', text)
+          : index === input.selected
+            ? context.tui('selected', text)
+            : text,
       );
     });
-    if (window.after) rows.push(theme.muted('  ↓ more'));
+    if (window.after) rows.push(context.tui('muted', '  ↓ more'));
   }
   let inputRow: number | undefined;
   if (input.value !== undefined) {
@@ -157,11 +164,11 @@ export function renderSetupFrame(input: {
   const visibleRows = rows.slice(0, contentRows);
   while (visibleRows.length < contentRows) visibleRows.push('');
   const lines = [
-    theme.muted(`╭${line}╮`),
+    context.tui('border', `╭${line}╮`),
     ...visibleRows.map((row) => `│ ${padDisplay(row, inner)} │`),
-    theme.muted(`├${line}┤`),
-    `│ ${theme.muted(padDisplay(controls, inner))} │`,
-    theme.muted(`╰${line}╯`),
+    context.tui('border', `├${line}┤`),
+    `│ ${context.tui('muted', padDisplay(controls, inner))} │`,
+    context.tui('border', `╰${line}╯`),
   ];
   if (lines.length > height) lines.splice(1 + contentRows, lines.length - height);
   const cursor =
@@ -194,6 +201,8 @@ async function runSetupWizard(
 ): Promise<SetupResult | undefined> {
   const input = screen.input;
   const output = screen.output;
+  const context =
+    options.themeContext ?? createThemeContext({ isTTY: output.isTTY, env: process.env });
   let step: SetupStep = options.confirmReplace ? 'confirm' : 'provider';
   let selected = options.confirmReplace ? 1 : 0;
   let value = '';
@@ -215,7 +224,18 @@ async function runSetupWizard(
     const width = output.columns ?? 80;
     const height = output.rows ?? 28;
     const screen = (title: string, extra: Partial<Parameters<typeof renderSetupScreen>[0]>) =>
-      screenOutput.draw(renderSetupFrame({ width, height, step, title, message, busy, ...extra }));
+      screenOutput.draw(
+        renderSetupFrame({
+          width,
+          height,
+          step,
+          title,
+          message,
+          busy,
+          themeContext: context,
+          ...extra,
+        }),
+      );
     if (step === 'confirm')
       return screen('Replace active provider settings?', {
         items: [

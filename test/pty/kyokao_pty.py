@@ -124,6 +124,9 @@ class Shell:
         self.send(command + "\r")
         return start
 
+    def resize(self, rows, columns):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
     def close(self):
         self.send("exit\r")
         os.waitpid(self.pid, 0)
@@ -280,6 +283,28 @@ def run(binary):
             raise AssertionError("delayed provider request did not start")
         shell.send("queued\n")
         shell.wait("Queue 1", mark)
+        shell.resize(30, 79)
+        narrow_mark = len(shell.output)
+        shell.send("/theme\r")
+        shell.wait("Active TUI theme:", narrow_mark)
+        shell.wait("github-light", narrow_mark)
+        narrow_frame = ANSI.sub("", shell.output[narrow_mark:])
+        assert "high-contrast" in narrow_frame
+        assert "github-light" in narrow_frame
+        theme_mark = len(shell.output)
+        shell.send("/theme solarized-light\r")
+        shell.wait("TUI theme changed to solarized-light.", theme_mark)
+        shell.wait("Queue 1", theme_mark)
+        shell.send("/theme code github-light\r")
+        shell.wait("Code theme changed to github-light.", theme_mark)
+        shell.wait("Queue 1", theme_mark)
+        shell.send("/theme dracla\r")
+        shell.wait('Unknown TUI theme "dracla". Did you mean: dracula', theme_mark)
+        shell.wait("Queue 1", theme_mark)
+        shell.send("/theme save\r")
+        shell.wait("Saved TUI theme solarized-light and code theme github-light.", theme_mark)
+        shell.wait("Queue 1", theme_mark)
+        shell.resize(30, 100)
         missing_session = "00000000-0000-4000-8000-000000000000"
         invalid_commands = [
             (f"/resume {missing_session}", f"Session not found: {missing_session}"),
@@ -309,6 +334,11 @@ def run(binary):
         assert scheduled == ["first delayed", "replacement", "queued", "line one\nline two"], scheduled
         assert "respond deterministically" in request_users[-1], "approval change lost session context"
         assert request_users[-1][-4:] == ["first delayed", "replacement", "queued", "line one\nline two"]
+        with open(config_path, encoding="utf-8") as config_file:
+            saved_theme_config = json.load(config_file)
+        assert saved_theme_config["theme"] == "solarized-light"
+        assert saved_theme_config["codeTheme"] == "github-light"
+        assert saved_theme_config["providers"]["pty"]["apiKey"] == "pty-test-key"
         ready_mark = len(shell.output)
         shell.wait("Ready", ready_mark)
         shell.send("/exit\r")

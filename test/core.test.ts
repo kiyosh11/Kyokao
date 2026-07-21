@@ -20,7 +20,14 @@ import {
 } from '@kyokao/tools';
 import { LocalStore } from '@kyokao/memory';
 import { OpenAICompatibleProvider, modelCatalog, toOpenAIMessage } from '@kyokao/providers';
-import { Agent, compressMessages, estimateTokens, loadInstructionFiles } from '@kyokao/agent';
+import {
+  Agent,
+  compressMessages,
+  estimateTokens,
+  isFutureIntentOnly,
+  loadInstructionFiles,
+  systemPrompt,
+} from '@kyokao/agent';
 const servers: Server[] = [];
 afterEach(() => servers.splice(0).forEach((server) => server.close()));
 const event = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
@@ -242,6 +249,185 @@ describe('OpenAI SDK streaming transcript', () => {
     ).toMatchObject({
       tool_calls: [{ type: 'function', function: { name: 'f', arguments: '{}' } }],
     }));
+});
+describe('coding completion guard', () => {
+  it('continues an intent-only coding response through write execution and verification', async () => {
+    const requests: any[] = [];
+    let call = 0;
+    const provider = new OpenAICompatibleProvider({
+      baseURL: 'https://provider.test/v1',
+      model: 'nvidia/deepseek-v3.1',
+      stream: false,
+      fetch: (async (_input, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        call++;
+        const message =
+          call === 1
+            ? {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'glob-1',
+                    type: 'function',
+                    function: { name: 'glob', arguments: '{"pattern":"*"}' },
+                  },
+                ],
+              }
+            : call === 2
+              ? { role: 'assistant', content: "I'll create the requested file now." }
+              : call === 3
+                ? {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'write-1',
+                        type: 'function',
+                        function: {
+                          name: 'write_file',
+                          arguments: '{"path":"answer.txt","content":"done"}',
+                        },
+                      },
+                    ],
+                  }
+                : { role: 'assistant', content: 'Created answer.txt and verified the write.' };
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message,
+                finish_reason: call === 1 || call === 3 ? 'tool_calls' : 'stop',
+              },
+            ],
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      }) as typeof fetch,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-intent-'));
+    const store = new LocalStore(join(dir, '.kyokao'));
+    const agent = new Agent({
+      provider,
+      tools: new CoreTools(new WorkspaceSandbox(dir), 'full-auto'),
+      store,
+      maxIterations: 5,
+      workspace: dir,
+    });
+    const session = await agent.run('Create answer.txt containing done');
+    expect(await readFile(join(dir, 'answer.txt'), 'utf8')).toBe('done');
+    expect(session.checkpoint).toBe('completed');
+    expect(requests).toHaveLength(4);
+    expect(
+      requests[2].messages.some(
+        (message: any) =>
+          message.role === 'system' && message.content.includes('only stated future intent'),
+      ),
+    ).toBe(true);
+    expect(
+      requests[3].messages.some(
+        (message: any) => message.role === 'tool' && message.tool_call_id === 'write-1',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not force tools for explanation-only prompts', async () => {
+    expect(
+      isFutureIntentOnly('Let me create an example to explain it.', 'Explain how to create a file'),
+    ).toBe(false);
+    expect(isFutureIntentOnly("I'll create the file.", 'Create the file')).toBe(true);
+    expect(
+      isFutureIntentOnly(
+        "Created the scaffold. I'll write the requested file now.",
+        'Create the scaffold and write the requested file',
+      ),
+    ).toBe(true);
+    for (const verb of ['generate', 'migrate', 'upgrade', 'optimize'])
+      expect(isFutureIntentOnly(`I'll ${verb} it now.`, `${verb} the project`)).toBe(true);
+    expect(systemPrompt('/workspace')).toContain('do not stop after describing future work');
+    expect(systemPrompt('/workspace')).toContain('explanation-only');
+    let calls = 0;
+    const provider = new OpenAICompatibleProvider({
+      baseURL: 'https://provider.test/v1',
+      model: 'explanation-model',
+      stream: false,
+      fetch: (async () => {
+        calls++;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: 'Let me create an example to explain it.',
+                },
+                finish_reason: 'stop',
+              },
+            ],
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        );
+      }) as typeof fetch,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-explain-'));
+    const session = await new Agent({
+      provider,
+      tools: new CoreTools(new WorkspaceSandbox(dir), 'full-auto'),
+      store: new LocalStore(join(dir, '.kyokao')),
+      maxIterations: 3,
+      workspace: dir,
+    }).run('Explain how to create a file');
+    expect(calls).toBe(1);
+    expect(session.checkpoint).toBe('completed');
+  });
+
+  it('propagates cancellation during an intent continuation', async () => {
+    let calls = 0;
+    let continuationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      continuationStarted = resolve;
+    });
+    const provider = new OpenAICompatibleProvider({
+      baseURL: 'https://provider.test/v1',
+      model: 'nvidia/deepseek-v3.1',
+      stream: false,
+      fetch: (async (_input, init) => {
+        calls++;
+        if (calls === 1)
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: { role: 'assistant', content: 'Let me update the file now.' },
+                  finish_reason: 'stop',
+                },
+              ],
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          );
+        continuationStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener('abort', abort, { once: true });
+        });
+      }) as typeof fetch,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-intent-cancel-'));
+    const controller = new AbortController();
+    const run = new Agent({
+      provider,
+      tools: new CoreTools(new WorkspaceSandbox(dir), 'full-auto'),
+      store: new LocalStore(join(dir, '.kyokao')),
+      maxIterations: 5,
+      workspace: dir,
+      signal: controller.signal,
+    }).run('Update answer.txt');
+    await started;
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(2);
+  });
 });
 describe('platform extensions', () => {
   it('compresses old context while preserving the system prompt and recent turn', () => {

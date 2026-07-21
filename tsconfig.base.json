@@ -19,7 +19,8 @@
       "@kyokao/tools": ["packages/tools/src/index.ts"],
       "@kyokao/memory": ["packages/memory/src/index.ts"],
       "@kyokao/agent": ["packages/agent/src/index.ts"],
-      "@kyokao/ui": ["packages/ui/src/index.ts"]
+      "@kyokao/ui": ["packages/ui/src/index.ts"],
+      "@kyokao/themes": ["packages/themes/src/index.ts"]
     }
   }
 }

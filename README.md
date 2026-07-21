@@ -24,6 +24,7 @@ It is a local command-line application with a full-screen terminal interface. Re
 
 - OpenAI-compatible local provider client and a native Capy remote-agent backend.
 - Concurrent TUI composition with cancellation-safe replacement and FIFO queued follow-ups.
+- Immutable dark/light TUI and code themes with live switching and ANSI-aware Markdown/syntax rendering.
 - Built-in presets for hosted and local endpoints; custom OpenAI-compatible endpoints are supported.
 - One-shot prompts, piped prompts, and a persistent full-screen interactive session by default.
 - Bare `kyokao`, `kyokao chat`, and `kyokao tui` open the same interactive terminal workspace in a TTY.
@@ -72,7 +73,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.4.0.tgz
+npm install -g ./kyokao-0.5.0.tgz
 kyokao --help
 ```
 
@@ -86,7 +87,7 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.4.0.tgz
+npm install -g .\kyokao-0.5.0.tgz
 npm uninstall -g kyokao
 ```
 
@@ -140,6 +141,7 @@ The workspace keeps one local session until `/new`. It streams provider output, 
 | `/memory [list\|set <key> <value>\|delete <key>]`     | Inspect or manage local memory.                                                                                                                        |
 | `/doctor`, `/diff`                                    | Run setup diagnostics or show the workspace diff.                                                                                                      |
 | `/queue [clear\|retry]`, `/capy`                      | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                     |
+| `/theme [name\|code <name>\|save]`                    | Preview or immediately switch TUI/code themes; explicitly save both choices globally.                                                                  |
 
 Unknown slash commands are rejected locally and are never sent to the model. One-shot prompts and piped standard input remain script-friendly and do not start the workspace.
 
@@ -161,6 +163,8 @@ pnpm --filter kyokao start -p groq -m llama-3.3-70b-versatile "inspect this repo
 | `--base-url <url>`       | Override the selected provider base URL for this invocation.                                           |
 | `--api-key <key>`        | Override the API key for this invocation; it is not persisted. Avoid putting secrets in shell history. |
 | `--approval <mode>`      | `suggest`, `auto-edit`, or `full-auto`.                                                                |
+| `--theme <name>`         | TUI theme for this invocation.                                                                         |
+| `--code-theme <name>`    | Fenced code and Markdown theme for this invocation.                                                    |
 | `--profile <name>`       | Select a configuration profile.                                                                        |
 | `--max-iterations <n>`   | Agent loop limit; an integer from 1 through 100.                                                       |
 | `--temperature <n>`      | Sampling temperature from 0 through 2.                                                                 |
@@ -185,6 +189,7 @@ The default invocation accepts `[prompt...]`: with words it runs them as one pro
 | `mcp`                      | Lists configured MCP stdio servers.                                                                        | `kyokao mcp`                                                    |
 | `edit <path>`              | Opens a workspace file in the configured editor.                                                           | `kyokao edit src/index.ts`                                      |
 | `providers`                | Prints built-in preset names and base URLs.                                                                | `kyokao providers`                                              |
+| `themes`                   | Previews all built-in TUI/code themes and marks the active choices.                                        | `kyokao themes`                                                 |
 | `config setup`             | Re-runs the interactive provider, model, and approval setup flow.                                          | `kyokao config setup`                                           |
 | `config show`              | Prints the resolved non-profile config with key/token/secret/password fields redacted.                     | `kyokao config show`                                            |
 | `config path`              | Prints the global config path.                                                                             | `kyokao config path`                                            |
@@ -278,12 +283,12 @@ kyokao -p ollama -m llama3.2 "explain this project"
 
 Kyokao reads JSON only. Configuration is resolved in this order, with later defined values taking precedence:
 
-1. Built-in defaults: `openai`, `gpt-4o-mini`, `auto-edit`, 12 iterations, a 16,000-token context budget, and compression at 80% of that budget.
+1. Built-in defaults: `openai`, `gpt-4o-mini`, `auto-edit`, `kyokao-dark`, `kyokao`, 12 iterations, a 16,000-token context budget, and compression at 80% of that budget.
 2. Global configuration.
 3. Project `.kyokao.json` in the current working directory.
 4. The selected profile, if `--profile <name>` names an existing profile.
-5. Environment: `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, `KYOKAO_TEMPERATURE`, `KYOKAO_MAX_TOKENS`, `KYOKAO_TOP_P`, and `KYOKAO_FALLBACK_MODELS`.
-6. CLI options, including `--context-window`, model sampling flags, editor selection, and safety limits.
+5. Environment, including `KYOKAO_THEME`, `KYOKAO_CODE_THEME`, `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, `KYOKAO_TEMPERATURE`, `KYOKAO_MAX_TOKENS`, `KYOKAO_TOP_P`, and `KYOKAO_FALLBACK_MODELS`.
+6. CLI options, including `--theme`, `--code-theme`, `--context-window`, model sampling flags, editor selection, and safety limits.
 
 Global configuration paths are:
 
@@ -297,12 +302,14 @@ Use `kyokao config path` to print the active platform global path. The applicati
 
 ### Schema and examples
 
-The supported top-level keys are `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. Provider entries can also contain Capy's required `projectId`.
+The supported top-level keys are `theme`, `codeTheme`, `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. Provider entries can also contain Capy's required `projectId`.
 
 A project configuration without secrets:
 
 ```json
 {
+  "theme": "solarized-light",
+  "codeTheme": "github-light",
   "provider": "openai",
   "model": "gpt-4o-mini",
   "approval": "auto-edit",
@@ -335,6 +342,20 @@ A project configuration without secrets:
 ```
 
 Use an alias with `-m fast` and a profile with `--profile review`. Profiles can also contain the same supported keys, including their own `providers` and `aliases`; selected profile values are merged after global and project configuration, before environment and CLI overrides.
+
+### Themes and terminal color
+
+Run `kyokao themes` for compact previews. TUI themes are `kyokao-dark`, `kyokao-light`, `dracula`, `nord`, `solarized-dark`, `solarized-light`, `monokai`, and `high-contrast`. Code themes are `kyokao`, `dracula`, `nord`, `solarized-dark`, `solarized-light`, `monokai`, and `github-light`.
+
+Inside the workspace, `/theme` lists active and available names, `/theme dracula` changes the full TUI immediately, `/theme code github-light` changes Markdown/fenced code immediately, and `/theme save` atomically writes both active choices to global configuration while retaining unrelated settings. Theme switching is render-only: it is allowed during active work and does not rebuild the provider/backend, cancel work, reset Capy state, or alter the session/queue.
+
+Kyokao negotiates ANSI 16, 256-color, or truecolor from `TERM` and `COLORTERM`. `NO_COLOR` always disables color. Non-TTY output is plain unless the established `FORCE_COLOR` or `CLICOLOR_FORCE` convention explicitly enables color. Themes do not force a terminal background, so light themes remain legible on light terminals.
+
+Markdown rendering styles headings, emphasis, inline code, links, lists, blockquotes, rules, and fenced blocks. Fences support TypeScript/JavaScript, Python, JSON, Bash/shell, Go, Rust, Java/C/C++, HTML/XML, CSS, YAML, SQL, Markdown, and diff. Tokenization is intentionally lightweight rather than a complete parser: nested language grammars, shell heredocs, template-language embeddings, and every malformed construct are not fully modeled. Incomplete strings/comments/fences fail closed as one token, and stripping ANSI reproduces the original source exactly.
+
+![Kyokao Dracula theme](docs/screenshots/kyokao-dracula.png)
+
+![Kyokao solarized-light and github-light themes](docs/screenshots/kyokao-solarized-light.png)
 
 ### Custom OpenAI-compatible provider
 
@@ -473,8 +494,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -484,7 +505,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.4.0.tgz
+TARBALL=kyokao-0.5.0.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -496,7 +517,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.4.0.tgz'
+$tarball = '.\kyokao-0.5.0.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help
@@ -512,7 +533,8 @@ Remove-Item -Recurse -Force $prefix
 | `@kyokao/tools`     | Workspace sandbox, core tools, plugins, MCP stdio clients, and tool composition.                  |
 | `@kyokao/memory`    | Local session, usage, context-summary, and manual-memory JSON persistence.                        |
 | `@kyokao/agent`     | Local/Capy backends, prompt scheduler, context compression, bounded tool loop, and checkpoints.   |
-| `@kyokao/ui`        | Colored output, syntax highlighting, approval prompts, and full-screen terminal rendering.        |
+| `@kyokao/themes`    | Immutable semantic TUI/code contracts, built-in registries, and terminal color capability logic.  |
+| `@kyokao/ui`        | Scoped themed output, Markdown/token rendering, approval prompts, and full-screen TUI rendering.  |
 | `kyokao`            | Commander CLI wiring, commands, and runtime construction.                                         |
 
 For an agent run, the CLI resolves configuration and provider settings, validates the selected model against `/models`, starts configured plugins and MCP servers, creates a workspace sandbox and local store, then sends a system prompt, compacted transcript, and user prompt to the provider. The provider response may stream text and function calls. For each returned call, the agent executes the matching core, plugin, or MCP tool, appends a tool-result message, records usage, saves a checkpoint, and calls the provider again. It stops when no tool calls remain or errors after the configured iteration limit. Transient provider failures are retried up to two times with short exponential backoff; aborts and messages matching certain client/configuration error patterns are not retried.

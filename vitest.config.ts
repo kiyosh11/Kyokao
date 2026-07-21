@@ -9,6 +9,7 @@ export default defineConfig({
       '@kyokao/memory': resolve('packages/memory/src/index.ts'),
       '@kyokao/agent': resolve('packages/agent/src/index.ts'),
       '@kyokao/ui': resolve('packages/ui/src/index.ts'),
+      '@kyokao/themes': resolve('packages/themes/src/index.ts'),
     },
   },
 });
