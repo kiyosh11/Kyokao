@@ -94,9 +94,7 @@ describe('SubAgentTools', () => {
             };
         return new Response(
           JSON.stringify({
-            choices: [
-              { message, finish_reason: hadToolResult ? 'stop' : 'tool_calls' },
-            ],
+            choices: [{ message, finish_reason: hadToolResult ? 'stop' : 'tool_calls' }],
           }),
           { headers: { 'content-type': 'application/json' } },
         );
@@ -142,9 +140,7 @@ describe('SubAgentTools', () => {
             };
         return new Response(
           JSON.stringify({
-            choices: [
-              { message, finish_reason: hadToolResult ? 'stop' : 'tool_calls' },
-            ],
+            choices: [{ message, finish_reason: hadToolResult ? 'stop' : 'tool_calls' }],
           }),
           { headers: { 'content-type': 'application/json' } },
         );
@@ -210,7 +206,17 @@ describe('SubAgentTools constants', () => {
   });
 
   it('the allowed set covers all CoreTools names', () => {
-    for (const name of ['read_file', 'list_files', 'glob', 'grep', 'write_file', 'apply_patch', 'shell', 'git', 'http_get'])
+    for (const name of [
+      'read_file',
+      'list_files',
+      'glob',
+      'grep',
+      'write_file',
+      'apply_patch',
+      'shell',
+      'git',
+      'http_get',
+    ])
       expect(SUBAGENT_ALLOWED_TOOLS.has(name)).toBe(true);
   });
 });

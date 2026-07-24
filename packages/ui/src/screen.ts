@@ -24,6 +24,9 @@ export interface WorkspaceHeader {
   workspace: string;
   provider: string;
   model: string;
+  buildModel?: string;
+  spendingUsd?: number;
+  spendingLabel?: string;
   approval: string;
 }
 
@@ -81,7 +84,10 @@ function formatContextTokenCount(tokens: number): string {
   if (tokens < 1_000) return String(tokens);
   if (tokens < 10_000) return `${(tokens / 1_000).toFixed(1)}K`;
   if (tokens < 1_000_000) return `${Math.floor(tokens / 1_000)}K`;
-  if (tokens < 10_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens < 10_000_000) {
+    const millions = tokens / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+  }
   return `${Math.floor(tokens / 1_000_000)}M`;
 }
 
@@ -99,11 +105,12 @@ export function formatWorkspaceUsage(usage: WorkspaceUsage): string {
 }
 
 function formatContextUsage(usage?: WorkspaceUsage): string | undefined {
-  return usage?.contextTokens != null && usage.contextWindow
+  if (usage?.contextTokens == null) return undefined;
+  return usage.contextWindow
     ? `${formatContextTokenCount(usage.contextTokens)} / ${formatContextTokenCount(
         usage.contextWindow,
       )}`
-    : undefined;
+    : `${formatContextTokenCount(usage.contextTokens)} / ?`;
 }
 
 export function renderWorkspaceFooter(
@@ -127,28 +134,38 @@ export function renderWorkspaceFooter(
   const contextUsage = formatContextUsage(usage);
   const visibleHints = [...hints];
   const separator = '  │  ';
-  const plainSegments = () => [
-    ...(contextUsage ? [contextUsage] : []),
-    ...visibleHints.map(([key, label]) => `${key}:${label}`),
-  ];
-  while (visibleHints.length > 1 && displayWidth(plainSegments().join(separator)) > width) {
+  const rightPadding = contextUsage ? Math.min(2, Math.max(0, width - 1)) : 0;
+  const plainHints = () => visibleHints.map(([key, label]) => `${key}:${label}`).join(separator);
+  const right = contextUsage
+    ? truncateDisplay(contextUsage, Math.max(0, width - rightPadding))
+    : '';
+  const minimumGap = right ? 1 : 0;
+  while (
+    visibleHints.length &&
+    displayWidth(plainHints()) + minimumGap + displayWidth(right) + rightPadding > width
+  ) {
     visibleHints.pop();
   }
-  const plain = plainSegments().join(separator);
-  if (!context || context.colorLevel === 0 || displayWidth(plain) > width) {
-    return padDisplay(plain, width);
+  const left = truncateDisplay(
+    plainHints(),
+    Math.max(0, width - displayWidth(right) - minimumGap - rightPadding),
+  );
+  const gap = Math.max(0, width - displayWidth(left) - displayWidth(right) - rightPadding);
+  const plain = `${left}${' '.repeat(gap)}${right}${' '.repeat(rightPadding)}`;
+  if (!context || context.colorLevel === 0) {
+    return plain;
   }
-  const rendered = [
-    ...(contextUsage ? [readableMuted(context, contextUsage)] : []),
-    ...visibleHints.map(
+  const renderedLeft = visibleHints
+    .map(
       ([key, label]) =>
         `${context.paint(
           { ...context.tuiTheme.user, modifiers: ['bold'] },
           key,
         )}${readableMuted(context, `:${label}`)}`,
-    ),
-  ].join(context.paint({ ...context.tuiTheme.muted, modifiers: ['dim'] }, separator));
-  return `${rendered}${' '.repeat(Math.max(0, width - displayWidth(rendered)))}`;
+    )
+    .join(context.paint({ ...context.tuiTheme.muted, modifiers: ['dim'] }, separator));
+  const renderedContext = right ? readableMuted(context, right) : '';
+  return `${renderedLeft}${' '.repeat(gap)}${renderedContext}${' '.repeat(rightPadding)}`;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -188,7 +205,7 @@ function renderShortcutOverlay(width: number, context: ThemeContext): string[] {
     'Enter submit  ·  Tab queue while running  ·  Shift/Alt+Enter newline',
     'Esc interrupt/close  ·  Ctrl+C cancel/quit  ·  Ctrl+L clear',
     'Ctrl+T transcript  ·  Ctrl+O copy last response  ·  Ctrl+G editor',
-    'Ctrl+R/Ctrl+S history  ·  PgUp/PgDn scroll  ·  ? close',
+    'Ctrl+R/Ctrl+S history  ·  Wheel/PgUp/PgDn scroll  ·  ? close',
     'Ctrl+A/E line start/end  ·  Ctrl+B/F left/right  ·  Ctrl+P/N up/down',
     'Ctrl+U/K kill to start/end  ·  Ctrl+W/Alt+D delete word  ·  Ctrl+Y yank',
   ];
@@ -478,7 +495,14 @@ export function renderWorkspaceScreen(state: WorkspaceRenderState): ScreenFrame 
       : context.tui('primary', row);
     bodyLines.push(frameRow(borderedRow(painted, contentWidth, context)));
   }
-  const infoLabel = `${state.header.model} · ${state.header.approval}`;
+  const modelLabel = state.header.buildModel
+    ? `Captain ${state.header.model} · Build ${state.header.buildModel}`
+    : state.header.model;
+  const spendingLabel =
+    state.header.spendingUsd != null
+      ? `$${state.header.spendingUsd.toFixed(2)} ${state.header.spendingLabel ?? 'spent'}`
+      : undefined;
+  const infoLabel = [modelLabel, spendingLabel, state.header.approval].filter(Boolean).join(' · ');
   bodyLines.push(frameRow(captionedBottomBorder(contentWidth, infoLabel, context)));
 
   if (hintRows) {

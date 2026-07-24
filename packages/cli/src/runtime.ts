@@ -4,6 +4,7 @@ import {
   CapyClient,
   CapyProviderAdapter,
   OpenAICompatibleProvider,
+  supportsNvidiaReasoningEffort,
   type Provider,
 } from '@kyokao/providers';
 import {
@@ -50,6 +51,8 @@ export type Approve = (action: string, detail: string) => Promise<boolean>;
 
 export async function buildRuntime(config: KyokaoConfig, approve?: Approve): Promise<Runtime> {
   const p = resolveProvider(config);
+  if (!p.reasoningEffort && supportsNvidiaReasoningEffort(p.baseURL, p.model))
+    p.reasoningEffort = config.tui.showThinking ? 'medium' : 'low';
   const themeContext = createThemeContext({
     tuiTheme: config.theme,
     codeTheme: config.codeTheme,

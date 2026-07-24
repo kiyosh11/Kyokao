@@ -38,6 +38,7 @@ export interface TerminalWorkspaceOptions {
   output?: WriteStream;
   screen?: InteractiveScreen;
   themeContext?: ThemeContext;
+  initialDraft?: string;
   header: () => WorkspaceHeader;
   backend?: PromptBackend;
   onQueueChange?: (queue: readonly string[]) => Promise<void> | void;
@@ -57,7 +58,7 @@ export interface TerminalWorkspaceOptions {
   ) => Promise<WorkspaceCommandResult | void>;
   sessionTitle?: () => string;
   sessionPlan?: () => string[];
-  contextWindow?: () => number;
+  contextWindow?: () => number | undefined;
   contextTokens?: () => number;
   showThinking?: () => boolean;
   deleteSession?: (id: string) => Promise<boolean | void>;
@@ -112,7 +113,7 @@ export async function runTerminalWorkspace(options, screen) {
   const output = screen.output;
   const context =
     options.themeContext ?? createThemeContext({ isTTY: output.isTTY, env: process.env });
-  const editor = new EditorState();
+  const editor = new EditorState(options.initialDraft ?? '');
   const secretEditor = new EditorState();
   const history = new PromptHistory();
   const parser = new TerminalInputParser();
@@ -182,7 +183,11 @@ export async function runTerminalWorkspace(options, screen) {
       busyKind = busy ? 'prompt' : undefined;
       if (busy && !wasBusy) activityStartedAt = Date.now();
       else if (!busy) activityStartedAt = undefined;
-      if (state.phase === 'idle' && !state.active) void options.onSessionChange?.();
+      if (state.phase === 'idle' && !state.active)
+        void Promise.resolve()
+          .then(() => options.onSessionChange?.())
+          .catch(() => {})
+          .finally(() => draw());
       draw();
     },
     onRunStart: (prompt) => emit('user', prompt),
@@ -412,14 +417,36 @@ export async function runTerminalWorkspace(options, screen) {
           if (event.type === 'key' && event.key === 'escape') {
             overlay = undefined;
             scrollOffset = 0;
-          } else if (event.type === 'key' && ['page-up', 'up', 'ctrl-p'].includes(event.key)) {
-            scrollOffset += event.key === 'page-up' ? Math.max(1, (output.rows ?? 24) - 6) : 1;
-          } else if (event.type === 'key' && ['page-down', 'down', 'ctrl-n'].includes(event.key)) {
+          } else if (
+            event.type === 'key' &&
+            ['page-up', 'up', 'ctrl-p', 'scroll-up'].includes(event.key)
+          ) {
+            scrollOffset +=
+              event.key === 'page-up'
+                ? Math.max(1, (output.rows ?? 24) - 6)
+                : event.key === 'scroll-up'
+                  ? 3
+                  : 1;
+          } else if (
+            event.type === 'key' &&
+            ['page-down', 'down', 'ctrl-n', 'scroll-down'].includes(event.key)
+          ) {
             scrollOffset = Math.max(
               0,
-              scrollOffset - (event.key === 'page-down' ? Math.max(1, (output.rows ?? 24) - 6) : 1),
+              scrollOffset -
+                (event.key === 'page-down'
+                  ? Math.max(1, (output.rows ?? 24) - 6)
+                  : event.key === 'scroll-down'
+                    ? 3
+                    : 1),
             );
           }
+          draw();
+          return;
+        }
+        if (event.type === 'key' && (event.key === 'scroll-up' || event.key === 'scroll-down')) {
+          scrollOffset =
+            event.key === 'scroll-up' ? scrollOffset + 3 : Math.max(0, scrollOffset - 3);
           draw();
           return;
         }
@@ -515,14 +542,14 @@ export async function runTerminalWorkspace(options, screen) {
             if (sessionId) {
               void control
                 .deleteSession(sessionId)
-                .then((clearTranscript) => {
+                .then(async (clearTranscript) => {
                   if (clearTranscript) {
                     transcript = [];
                     usage = undefined;
                     scrollOffset = 0;
                   }
                   paletteIndex = Math.max(0, paletteIndex - 1);
-                  void options.onSessionChange?.();
+                  await options.onSessionChange?.();
                   draw();
                 })
                 .catch((error) =>

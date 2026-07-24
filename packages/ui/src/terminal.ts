@@ -11,6 +11,8 @@ export const ENHANCED_KEYBOARD_ENABLE = '\x1b[>1u';
 export const ENHANCED_KEYBOARD_DISABLE = '\x1b[<u';
 export const MODIFY_OTHER_KEYS_ENABLE = '\x1b[>4;2m';
 export const MODIFY_OTHER_KEYS_DISABLE = '\x1b[>4;0m';
+export const MOUSE_TRACKING_ENABLE = '\x1b[?1000h\x1b[?1006h';
+export const MOUSE_TRACKING_DISABLE = '\x1b[?1006l\x1b[?1000l';
 export interface ScreenFrame {
   lines: string[];
   /** ANSI SGR sequence used while clearing the viewport behind the rendered frame. */
@@ -55,7 +57,7 @@ export class InteractiveScreen {
     this.enhancedKeyboard = process.env.TERM !== 'dumb';
     process.once('exit', this.onProcessExit);
     this.output.write(
-      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${this.enhancedKeyboard ? `${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}` : ''}${CURSOR_SHOW}`,
+      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${MOUSE_TRACKING_ENABLE}${this.enhancedKeyboard ? `${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}` : ''}${CURSOR_SHOW}`,
     );
   }
   draw(frame: ScreenFrame): void {
@@ -87,7 +89,7 @@ export class InteractiveScreen {
     this.input.pause();
     this.input.setRawMode(false);
     this.output.write(
-      `${AUTOWRAP_ENABLE}${CURSOR_SHOW}${this.enhancedKeyboard ? `${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}` : ''}${BRACKETED_PASTE_DISABLE}${this.alternate ? ALT_SCREEN_LEAVE : ''}`,
+      `${AUTOWRAP_ENABLE}${CURSOR_SHOW}${MOUSE_TRACKING_DISABLE}${this.enhancedKeyboard ? `${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}` : ''}${BRACKETED_PASTE_DISABLE}${this.alternate ? ALT_SCREEN_LEAVE : ''}`,
     );
   }
   resume(): void {
@@ -95,7 +97,7 @@ export class InteractiveScreen {
     this.input.setRawMode(true);
     this.input.resume();
     this.output.write(
-      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${this.enhancedKeyboard ? `${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}` : ''}${CURSOR_SHOW}`,
+      `${this.alternate ? ALT_SCREEN_ENTER : ''}${BRACKETED_PASTE_ENABLE}${MOUSE_TRACKING_ENABLE}${this.enhancedKeyboard ? `${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}` : ''}${CURSOR_SHOW}`,
     );
     this.suspended = false;
   }
@@ -106,7 +108,7 @@ export class InteractiveScreen {
     try {
       if (!this.suspended)
         this.output.write(
-          `${AUTOWRAP_ENABLE}${CURSOR_SHOW}${this.enhancedKeyboard ? `${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}` : ''}${BRACKETED_PASTE_DISABLE}${this.alternate ? ALT_SCREEN_LEAVE : '\x1b[H\x1b[2J'}`,
+          `${AUTOWRAP_ENABLE}${CURSOR_SHOW}${MOUSE_TRACKING_DISABLE}${this.enhancedKeyboard ? `${MODIFY_OTHER_KEYS_DISABLE}${ENHANCED_KEYBOARD_DISABLE}` : ''}${BRACKETED_PASTE_DISABLE}${this.alternate ? ALT_SCREEN_LEAVE : '\x1b[H\x1b[2J'}`,
         );
     } catch {}
     this.suspended = false;

@@ -26,14 +26,12 @@ export async function runHeadless(
     const record = { kind, value, ts: Date.now() };
     events.push(record);
     if (format === 'streaming-json') {
-
       process.stdout.write(`${JSON.stringify(record)}\n`);
     }
   };
   try {
     const session = await runPrompt(r, prompt, existing, false, emit, signal, skipModelCheck);
     if (format === 'json') {
-
       const answer =
         typeof (session as unknown as { __answer?: string })?.__answer === 'string'
           ? (session as unknown as { __answer: string }).__answer

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { PromptBackend } from '@kyokao/agent';
 import type { KyokaoConfig } from '@kyokao/config';
 import type { Session } from '@kyokao/memory';
+import type { CapyThreadListItem } from '@kyokao/providers';
 import type { CommandDefinition, ThemeContext } from '@kyokao/ui';
 import { workspaceCommands } from '@kyokao/ui';
 import type { Runtime } from './runtime.js';
@@ -24,6 +25,7 @@ export interface TuiContext {
   sessionChoices: Session[];
   memoryChoices: Record<string, string>;
   providerModels: string[];
+  modelContextWindow?: number;
 
   projectChoices: Array<{ id: string; name: string; description?: string }>;
   capyModelChoices: Array<{ id: string; name: string; description?: string }>;
@@ -34,13 +36,24 @@ export interface TuiContext {
     captainEligible: boolean;
   }>;
   capyModelRole?: 'captain' | 'build';
+  capyThreadChoices: CapyThreadListItem[];
+  capySpending?: {
+    totalDollars: number;
+    llmDollars: number;
+    vmDollars: number;
+    from: string;
+    to: string;
+  };
+  capySpendingError?: string;
 
   replaceRuntime: (
     overrides: Partial<KyokaoConfig>,
     options?: ReplaceRuntimeOptions,
   ) => Promise<void>;
 
-  refreshProviderModels: () => void;
+  refreshProviderModels: () => Promise<void>;
+  refreshCapyThreads: () => Promise<void>;
+  refreshCapySpending: (force?: boolean) => Promise<void>;
 
   skipModelCheck: boolean;
 }

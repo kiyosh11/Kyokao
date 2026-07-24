@@ -31,23 +31,11 @@ export interface CapyProject {
 
 export type CapyThreadStatus = 'active' | 'idle' | 'archived';
 export type CapyRunState =
-  | 'running'
-  | 'stopping'
-  | 'queued'
-  | 'waiting'
-  | 'blocked'
-  | 'ready'
-  | 'archived';
+  'running' | 'stopping' | 'queued' | 'waiting' | 'blocked' | 'ready' | 'archived';
 export type CapyWaitingOn = 'task' | 'review' | 'ci' | 'timer' | 'worker';
 export type CapyBlockedOn = 'auth' | 'permission';
 export type CapyTaskStatus =
-  | 'backlog'
-  | 'queued'
-  | 'in_progress'
-  | 'needs_review'
-  | 'completed'
-  | 'error'
-  | 'archived';
+  'backlog' | 'queued' | 'in_progress' | 'needs_review' | 'completed' | 'error' | 'archived';
 
 export interface CapyTask {
   id: string;
@@ -221,9 +209,7 @@ export interface CapyUsageItem extends CapyUsageTotals {
   taskTitle: string | null;
   lastActivityAt: string;
   modelCount: number;
-  diffSummaryByMode: Partial<
-    Record<'uncommitted' | 'pr' | 'run', CapyUsageDiffSummary>
-  > | null;
+  diffSummaryByMode: Partial<Record<'uncommitted' | 'pr' | 'run', CapyUsageDiffSummary>> | null;
   routedSource: Exclude<CapyUsageRoute, 'all'>;
   routedSpendDollars: Partial<Record<Exclude<CapyUsageRoute, 'all'>, number>> | null;
 }
@@ -380,11 +366,7 @@ export interface CapyUpdateBrowserSnapshotInput {
 }
 
 export type CapyAutomationTriggerType =
-  | 'schedule'
-  | 'webhook'
-  | 'incoming_webhook'
-  | 'on_demand'
-  | 'integration';
+  'schedule' | 'webhook' | 'incoming_webhook' | 'on_demand' | 'integration';
 
 export interface CapyMcpOverrides {
   enabledServerKeys?: string[];
@@ -474,15 +456,7 @@ export type CapyVerifiedSession =
 
 export type CapySpeed = 'fast' | 'standard';
 export type CapyReasoningMode =
-  | 'off'
-  | 'on'
-  | 'none'
-  | 'minimal'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max';
+  'off' | 'on' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface CapyCreateThreadInput {
   projectId: string;

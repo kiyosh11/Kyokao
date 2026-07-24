@@ -21,7 +21,6 @@ export function withGroup(cmd: Command, group: HelpGroup): Command {
 
 export class GroupedHelp extends Help {
   override formatHelp(cmd: Command, helper: Help): string {
-
     const visible = helper.visibleCommands(cmd);
     if (visible.length <= 1) return super.formatHelp(cmd, helper);
     const grouped = new Map<HelpGroup, Command[]>();
@@ -54,7 +53,13 @@ export class GroupedHelp extends Help {
         const term = helper.subcommandTerm(sub);
         const desc = helper.subcommandDescription(sub);
         const indent = '  ' + term;
-        out.push(desc ? (indent.length >= 30 ? `${indent}  ${desc}` : `${indent.padEnd(30)}${desc}`) : indent);
+        out.push(
+          desc
+            ? indent.length >= 30
+              ? `${indent}  ${desc}`
+              : `${indent.padEnd(30)}${desc}`
+            : indent,
+        );
       }
       out.push('');
     }
@@ -65,7 +70,13 @@ export class GroupedHelp extends Help {
         const term = helper.optionTerm(opt);
         const desc = helper.optionDescription(opt);
         const indent = '  ' + term;
-        out.push(desc ? (indent.length >= 30 ? `${indent}  ${desc}` : `${indent.padEnd(30)}${desc}`) : indent);
+        out.push(
+          desc
+            ? indent.length >= 30
+              ? `${indent}  ${desc}`
+              : `${indent.padEnd(30)}${desc}`
+            : indent,
+        );
       }
       out.push('');
     }

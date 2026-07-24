@@ -12,6 +12,8 @@ import {
   ENHANCED_KEYBOARD_ENABLE,
   MODIFY_OTHER_KEYS_DISABLE,
   MODIFY_OTHER_KEYS_ENABLE,
+  MOUSE_TRACKING_DISABLE,
+  MOUSE_TRACKING_ENABLE,
   EditorState,
   createThemeContext,
   displayWidth,
@@ -480,6 +482,8 @@ describe('interactive screen lifecycle and editor', () => {
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
     expect(count(output.text, BRACKETED_PASTE_ENABLE)).toBe(1);
     expect(count(output.text, BRACKETED_PASTE_DISABLE)).toBe(1);
+    expect(count(output.text, MOUSE_TRACKING_ENABLE)).toBe(1);
+    expect(count(output.text, MOUSE_TRACKING_DISABLE)).toBe(1);
     expect(count(output.text, ENHANCED_KEYBOARD_ENABLE)).toBe(1);
     expect(count(output.text, ENHANCED_KEYBOARD_DISABLE)).toBe(1);
     expect(count(output.text, MODIFY_OTHER_KEYS_ENABLE)).toBe(1);
@@ -584,6 +588,15 @@ describe('interactive screen lifecycle and editor', () => {
       { type: 'key', key: 'alt-left' },
       { type: 'key', key: 'alt-right' },
     ]);
+  });
+  it('parses SGR mouse-wheel input for transcript scrolling', () => {
+    const parser = new TerminalInputParser();
+    expect(parser.feed('\x1b[<64;40;12M\x1b[<65;40;12M')).toEqual([
+      { type: 'key', key: 'scroll-up' },
+      { type: 'key', key: 'scroll-down' },
+    ]);
+    expect(parser.feed('\x1b[<6')).toEqual([]);
+    expect(parser.feed('4;20;8M')).toEqual([{ type: 'key', key: 'scroll-up' }]);
   });
   it('distinguishes Shift/Ctrl/Alt Enter encodings and keeps paste literal', () => {
     const parser = new TerminalInputParser();
@@ -707,16 +720,34 @@ describe('interactive screen lifecycle and editor', () => {
     expect(narrow).toContain('Esc:interrupt');
     expect(narrow).toContain('Ctrl+T');
   });
-  it('keeps context usage directly beside the footer controls', () => {
+  it('anchors context usage at the far-right edge of the footer', () => {
     const footer = renderWorkspaceFooter(100, {
       totalTokens: 0,
       estimatedCostUsd: 0,
       contextTokens: 0,
       contextWindow: 16_000,
     });
-    expect(footer).toContain(
-      '0 / 16K  │  Esc:interrupt  │  Ctrl+T:transcript  │  ?:shortcuts  │  Ctrl+C:quit',
-    );
+    expect(footer).toContain('Esc:interrupt  │  Ctrl+T:transcript  │  ?:shortcuts  │  Ctrl+C:quit');
+    expect(footer.endsWith('0 / 16K  ')).toBe(true);
+    expect(displayWidth(footer)).toBe(100);
+  });
+  it('marks model capacity unknown instead of inventing the configured default', () => {
+    const footer = renderWorkspaceFooter(100, {
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+      contextTokens: 66,
+    });
+    expect(footer).toContain('66 / ?');
+    expect(footer.endsWith('66 / ?  ')).toBe(true);
+  });
+  it('formats Capy million-token model capacities without a fake 16K limit', () => {
+    const footer = renderWorkspaceFooter(100, {
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+      contextTokens: 66,
+      contextWindow: 1_000_000,
+    });
+    expect(footer.endsWith('66 / 1M  ')).toBe(true);
   });
   it('formats reference-scale context and live token counts without losing zeroes', () => {
     const frame = renderWorkspaceScreen({
@@ -772,9 +803,7 @@ describe('interactive screen lifecycle and editor', () => {
     expect(rows).toHaveLength(30);
     expect(frame.lines.every((line) => displayWidth(line) === 111)).toBe(true);
     expect(rows[1]).not.toContain('0 / 128K');
-    expect(rows.find((line) => line.includes('Esc:interrupt'))).toContain(
-      '0 / 128K  │  Esc:interrupt',
-    );
+    expect(rows.find((line) => line.includes('Esc:interrupt'))).toMatch(/0 \/ 128K\s*│$/);
     expect(rows.find((line) => line.includes('❯ hey'))).not.toContain('2:24');
     expect(workspace.match(/Responding/g)).toHaveLength(1);
     expect(workspace).not.toContain('◆ Thinking');
@@ -882,6 +911,73 @@ describe('interactive screen lifecycle and editor', () => {
     input.send('/quit\r');
     await done;
     expect(commands).toContain('quit');
+  });
+  it('opens a preloaded remote-history picker on the first frame', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      initialDraft: '/resume ',
+      header: () => ({ workspace: '~', provider: 'capy', model: 'fake', approval: 'suggest' }),
+      commandPalette: (value) =>
+        value === '/resume '
+          ? [
+              {
+                name: 'resume',
+                group: 'session',
+                syntax: '/resume capy:thread-1',
+                label: 'Remote Capy conversation',
+                description: 'Capy ready',
+                completion: '/resume capy:thread-1',
+                submit: true,
+              },
+            ]
+          : undefined,
+      async onPrompt() {},
+      async onCommand() {},
+    });
+
+    const frame = plain(output.text.split('\x1b[2J').at(-1)!);
+    expect(frame).toContain('Remote Capy conversation');
+    expect(frame).toContain('/resume ');
+    input.send('\x03');
+    await done;
+  });
+  it('scrolls the live transcript with the mouse wheel', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt() {},
+      async onCommand(command) {
+        if (command.name === 'help')
+          return {
+            messages: [
+              {
+                text: Array.from({ length: 50 }, (_, index) => `history line ${index + 1}`).join(
+                  '\n',
+                ),
+              },
+            ],
+          };
+        return command.name === 'quit' ? { close: true } : undefined;
+      },
+    });
+    input.send('/help\r');
+    await tick();
+    const before = plain(output.text.split('\x1b[2J').at(-1)!);
+    expect(before).toContain('history line 50');
+    input.send('\x1b[<64;40;12M');
+    const scrolled = plain(output.text.split('\x1b[2J').at(-1)!);
+    expect(scrolled).toContain('history line 30');
+    expect(scrolled).not.toContain('history line 50');
+    input.send('\x1b[<65;40;12M');
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).toContain('history line 50');
+    input.send('/quit\r');
+    await done;
   });
   it('cleans stale palette rows and restores the screen on close and Ctrl-C', async () => {
     const input = new FakeInput();

@@ -15,15 +15,15 @@ Kyokao 0.8.0 rebuilds the terminal workspace UI with a minimal free-flowing tran
 
 ### New slash commands
 
-| Command | Group | Description |
-|---|---|---|
-| `/rename <title>` | Session | Set the session title shown on the prompt-box border. |
-| `/context` | Context | Show transcript token usage against the configured budget, compression threshold, and cumulative session totals. |
-| `/compact` | Context | Manually run context compression on the saved transcript. Refuses during active requests or on the Capy remote backend. |
-| `/rewind` | Context | Drop the last conversation turn (the most recent user prompt and everything after it). |
-| `/plan <step>` | Planning | Add a step to the session plan. Also `/plan run` (enqueue all steps) and `/plan clear`. |
-| `/view-plan` | Planning | Show the current plan. |
-| `/copy` | Setup | Copy the last assistant reply to the system clipboard (uses `clip.exe` / `pbcopy` / `xclip` — no new dependency). |
+| Command           | Group    | Description                                                                                                             |
+| ----------------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `/rename <title>` | Session  | Set the session title shown on the prompt-box border.                                                                   |
+| `/context`        | Context  | Show transcript token usage against the configured budget, compression threshold, and cumulative session totals.        |
+| `/compact`        | Context  | Manually run context compression on the saved transcript. Refuses during active requests or on the Capy remote backend. |
+| `/rewind`         | Context  | Drop the last conversation turn (the most recent user prompt and everything after it).                                  |
+| `/plan <step>`    | Planning | Add a step to the session plan. Also `/plan run` (enqueue all steps) and `/plan clear`.                                 |
+| `/view-plan`      | Planning | Show the current plan.                                                                                                  |
+| `/copy`           | Setup    | Copy the last assistant reply to the system clipboard (uses `clip.exe` / `pbcopy` / `xclip` — no new dependency).       |
 
 All commands are grouped into the `/help` output: **Session**, **Model**, **Context**, **Planning**, **Workspace**, **Setup**. The command palette shows a `N of M` counter and group-aware section labels (`Providers`, `Models`, `Themes`, etc.).
 
@@ -33,13 +33,13 @@ All commands are grouped into the `/help` output: **Session**, **Model**, **Cont
 
 Five TUI slash-command flows are available for Capy:
 
-| Command | Description |
-|---|---|
-| `/threads [query]` | List Capy threads for the active project. Optional free-text `query` filters by title/content. |
-| `/task <id>` | Show a task record (identifier, status, prompt, linked PR, thread). |
-| `/tags [list\|set <name>...\|create <name> [color]]` | Manage Capy thread tags. `set` tags the active thread; `create` defines a project tag. |
-| `/usage [orgId] [from] [to]` | Show Capy usage/billing totals (LLM + VM dollars) for the month or a custom range. |
-| `/diff <taskId>` | Extended `/diff`: with a task ID, fetches and renders the task's remote diff. |
+| Command                                              | Description                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `/threads [query]`                                   | List Capy threads for the active project. Optional free-text `query` filters by title/content. |
+| `/task <id>`                                         | Show a task record (identifier, status, prompt, linked PR, thread).                            |
+| `/tags [list\|set <name>...\|create <name> [color]]` | Manage Capy thread tags. `set` tags the active thread; `create` defines a project tag.         |
+| `/usage [orgId] [from] [to]`                         | Show Capy usage/billing totals (LLM + VM dollars) for the month or a custom range.             |
+| `/diff <taskId>`                                     | Extended `/diff`: with a task ID, fetches and renders the task's remote diff.                  |
 
 `/resume` for Capy sessions now **rebuilds the local transcript from remote history** — when the Capy API returns both user and assistant messages, the local session file is repopulated from the authoritative remote record (recovering history even when the local file is missing or stale).
 
@@ -82,15 +82,15 @@ Kyokao 0.7.0 consolidates all state under a single home directory (`~/.kyokao/`)
 
 ### What moved
 
-| Before (0.6.x) | After (0.7.0) |
-|---|---|
-| `~/.config/kyokao/config.json` (Unix) | `~/.kyokao/config.json` |
-| `%APPDATA%/kyokao/config.json` (Windows) | `~/.kyokao/config.json` |
-| `<workspace>/.kyokao/sessions/` | `~/.kyokao/sessions/` |
-| `<workspace>/.kyokao/memory.json` | `~/.kyokao/memory.json` |
-| `<workspace>/.kyokao/instructions.md` | `~/.kyokao/instructions.md` |
-| `<workspace>/.kyokao/soul.md` | `~/.kyokao/soul.md` |
-| `<workspace>/.kyokao/commands/*.md` | `~/.kyokao/commands/*.md` |
+| Before (0.6.x)                                | After (0.7.0)                                          |
+| --------------------------------------------- | ------------------------------------------------------ |
+| `~/.config/kyokao/config.json` (Unix)         | `~/.kyokao/config.json`                                |
+| `%APPDATA%/kyokao/config.json` (Windows)      | `~/.kyokao/config.json`                                |
+| `<workspace>/.kyokao/sessions/`               | `~/.kyokao/sessions/`                                  |
+| `<workspace>/.kyokao/memory.json`             | `~/.kyokao/memory.json`                                |
+| `<workspace>/.kyokao/instructions.md`         | `~/.kyokao/instructions.md`                            |
+| `<workspace>/.kyokao/soul.md`                 | `~/.kyokao/soul.md`                                    |
+| `<workspace>/.kyokao/commands/*.md`           | `~/.kyokao/commands/*.md`                              |
 | `<workspace>/.kyokao.json` (config overrides) | **Removed** — use `~/.kyokao/config.json` or a profile |
 
 ### What stays workspace-local

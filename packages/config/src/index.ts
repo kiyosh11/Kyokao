@@ -116,6 +116,8 @@ export function resolveProvider(config, env = process.env) {
     topP: custom.topP ?? config.topP,
     fallbackModels: custom.fallbackModels ?? config.fallbackModels,
     stream: custom.stream,
+    reasoningEffort: custom.reasoningEffort,
+    timeoutMs: custom.timeoutMs ?? (config.provider === 'nvidia' ? 60_000 : 120_000),
   };
 }
 export function redactEndpoint(value) {

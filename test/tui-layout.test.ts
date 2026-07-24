@@ -149,6 +149,29 @@ describe('rebuilt TUI layout contract', () => {
     expect(text).not.toContain('◆ Thinking…');
   });
 
+  it('shows separate Captain and Build models for Capy', () => {
+    const frame = renderWorkspaceScreen({
+      width: 111,
+      height: 20,
+      header: {
+        workspace: 'remote:project-1',
+        provider: 'capy',
+        model: 'captain-model',
+        buildModel: 'builder-model',
+        spendingUsd: 12.34,
+        spendingLabel: 'project MTD',
+        approval: 'full-auto',
+      },
+      transcript: [],
+      editor: new EditorState(''),
+    });
+    const rendered = frame.lines.map(stripAnsi).join('\n');
+    expect(rendered).toContain(
+      'Captain captain-model · Build builder-model · $12.34 project MTD · full-auto',
+    );
+    expectSafeFrame(frame, 111, 20);
+  });
+
   it('keeps approval and secret prompts focused and cursor-safe', () => {
     const approval = renderWorkspaceScreen({
       width: 72,

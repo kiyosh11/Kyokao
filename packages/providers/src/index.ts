@@ -4,13 +4,200 @@ import { modelCatalog } from './types.js';
 // Public API re-exports — package surface unchanged for consumers.
 export * from './types.js';
 export * from './capy.js';
+
+const NVIDIA_HOST = 'integrate.api.nvidia.com';
+const NVIDIA_CATALOG_URL = 'https://api.ngc.nvidia.com/v2/search/catalog/resources/ENDPOINT';
+const GPT_OSS_MODEL = /^openai\/gpt-oss-(?:20b|120b)(?:$|[-:])/i;
+
+function hostname(baseURL) {
+  try {
+    return new URL(baseURL).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function providerErrorStatus(error) {
+  if (!(error instanceof Error)) return 0;
+  return typeof error.status === 'number'
+    ? error.status
+    : Number(error.message.match(/\b([45]\d\d)\b/)?.[1] ?? 0);
+}
+
+function normalizeChatError(error, model, baseURL) {
+  if (!(error instanceof Error) || providerErrorStatus(error) !== 404) return error;
+  const nvidia = hostname(baseURL) === NVIDIA_HOST;
+  const normalized = new Error(
+    nvidia
+      ? `NVIDIA cannot serve model "${model}" through Chat Completions (404). Choose another NVIDIA chat model with /model.`
+      : `Provider cannot serve model "${model}" through Chat Completions (404). Choose another model with /model.`,
+    { cause: error },
+  );
+  normalized.name = 'ProviderModelUnavailableError';
+  normalized.status = 404;
+  return normalized;
+}
+
+function catalogValues(resource, key) {
+  return (
+    resource?.labels?.find((label) => label.key === key)?.values?.map((value) => String(value)) ??
+    []
+  );
+}
+
+function catalogAttribute(resource, key) {
+  return resource?.attributes?.find((attribute) => attribute.key === key)?.value;
+}
+
+function normalizedModelPart(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function positiveInteger(value) {
+  const number = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+/**
+ * OpenAI-compatible model endpoints are not consistent about context metadata.
+ * Preserve it when present, but only accept unambiguous context-length fields;
+ * `max_tokens` is deliberately excluded because it commonly means output limit.
+ */
+export function modelContextWindow(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidates = [
+    value.context_window,
+    value.contextWindow,
+    value.context_length,
+    value.contextLength,
+    value.max_context_length,
+    value.maxContextLength,
+    value.max_model_len,
+    value.maxModelLen,
+    value.max_position_embeddings,
+  ];
+  for (const candidate of candidates) {
+    const parsed = positiveInteger(candidate);
+    if (parsed) return parsed;
+  }
+  for (const nested of [value.metadata, value.capabilities, value.architecture]) {
+    const parsed = modelContextWindow(nested);
+    if (parsed) return parsed;
+  }
+  return undefined;
+}
+
+/**
+ * NVIDIA's `/v1/models` currently includes retired, non-chat, and self-hosted
+ * catalog entries. Intersect it with the live public catalog so interactive
+ * choices contain only active free Chat Completions endpoints.
+ */
+export function filterNvidiaChatModels(modelIds, resources) {
+  const eligible = resources.filter(
+    (resource) =>
+      String(catalogAttribute(resource, 'AVAILABLE')).toLowerCase() === 'true' &&
+      catalogValues(resource, 'nimType').some((value) => value.toLowerCase() === 'free endpoint') &&
+      catalogValues(resource, 'playgroundType').some((value) => value.toLowerCase() === 'chat'),
+  );
+  return modelIds.filter((id) => {
+    const [owner, ...modelParts] = id.split('/');
+    const model = modelParts.join('/');
+    if (!owner || !model) return false;
+    return eligible.some((resource) => {
+      const publisherMatches = catalogValues(resource, 'publisher').some(
+        (publisher) => normalizedModelPart(publisher) === normalizedModelPart(owner),
+      );
+      const nameMatches = [resource.name, resource.displayName].some(
+        (name) => normalizedModelPart(name) === normalizedModelPart(model),
+      );
+      return publisherMatches && nameMatches;
+    });
+  });
+}
+
+/** GPT-OSS exposes reasoning_effort through NVIDIA's Chat Completions API. */
+export function supportsNvidiaReasoningEffort(baseURL, model) {
+  return hostname(baseURL) === NVIDIA_HOST && GPT_OSS_MODEL.test(model);
+}
+
+/**
+ * NVIDIA reasoning traces are output metadata, not conversation input.
+ * Replaying them on a later turn makes GPT-OSS re-process hidden chain of
+ * thought and can substantially delay time-to-first-token.
+ */
+export function shouldStripReasoningHistory(baseURL, model) {
+  return hostname(baseURL) === NVIDIA_HOST || GPT_OSS_MODEL.test(model);
+}
+
+function historyLine(message) {
+  if (message.role === 'user') return `User: ${message.content}`;
+  if (message.role === 'assistant') {
+    const calls = (message.tool_calls ?? [])
+      .map((call) => `${call.name}(${call.arguments})`)
+      .join(', ');
+    return [
+      message.content ? `Assistant: ${message.content}` : '',
+      calls ? `Assistant tool calls: ${calls}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (message.role === 'tool')
+    return `Tool ${message.name ?? message.tool_call_id}: ${message.content}`;
+  return '';
+}
+
+/**
+ * NVIDIA NIM releases before the GPT-OSS Harmony multi-turn parser fix can
+ * stall when an assistant role from a completed turn is passed back in chat
+ * history. Keep the current turn wire-native (including tool calls/results),
+ * but encode completed turns as reference text in the newest user message.
+ */
+export function prepareNvidiaGptOssMessages(messages) {
+  const userIndexes = messages.flatMap((message, index) =>
+    message.role === 'user' ? [index] : [],
+  );
+  if (userIndexes.length < 2) return messages;
+  const currentUserIndex = userIndexes.at(-1);
+  const prefix = messages.slice(0, currentUserIndex);
+  const currentTurn = messages.slice(currentUserIndex);
+  const systemMessages = prefix.filter((message) => message.role === 'system');
+  const history = prefix
+    .filter((message) => message.role !== 'system')
+    .map(historyLine)
+    .filter(Boolean)
+    .join('\n\n');
+  if (!history) return [...systemMessages, ...currentTurn];
+  const currentUser = currentTurn[0];
+  return [
+    ...systemMessages,
+    {
+      role: 'user',
+      content: [
+        '<conversation_history>',
+        history,
+        '</conversation_history>',
+        '',
+        '<current_request>',
+        currentUser.content,
+        '</current_request>',
+      ].join('\n'),
+    },
+    ...currentTurn.slice(1),
+  ];
+}
+
 /** Maps Kyokao's stable transcript shape to the OpenAI wire protocol. */
-export function toOpenAIMessage(message) {
+export function toOpenAIMessage(message, options = {}) {
   if (message.role === 'assistant')
     return {
       role: 'assistant',
       content: message.content,
-      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+      ...(options.includeReasoningContent !== false && message.reasoning_content
+        ? { reasoning_content: message.reasoning_content }
+        : {}),
       tool_calls: message.tool_calls?.map((call) => ({
         id: call.id,
         type: 'function',
@@ -37,6 +224,7 @@ export class OpenAICompatibleProvider {
   client;
   fallbackIndex = -1;
   modelCache;
+  modelInfoCache = new Map();
   constructor(options) {
     this.options = options;
     if (!options.baseURL) throw new Error('Provider baseURL is required');
@@ -44,6 +232,10 @@ export class OpenAICompatibleProvider {
       this.client = new OpenAI({
         baseURL: options.baseURL,
         apiKey: options.apiKey ?? 'not-required',
+        // Agent.run owns retry policy. Disabling the SDK retry loop prevents
+        // one slow hosted failure from being retried at both layers.
+        maxRetries: 0,
+        timeout: options.timeoutMs ?? 120_000,
       });
   }
   get request() {
@@ -55,16 +247,49 @@ export class OpenAICompatibleProvider {
   async models(signal) {
     if (this.modelCache && this.modelCache.expiresAt > Date.now())
       return [...this.modelCache.values];
-    let values;
-    if (this.client)
-      values = (await this.client.models.list({ signal })).data.map((model) => model.id);
+    let records;
+    if (this.client) records = (await this.client.models.list({ signal })).data;
     else {
       const response = await this.request(`${this.options.baseURL.replace(/\/$/, '')}/models`, {
         headers: this.headers(),
         signal,
       });
       if (!response.ok) throw new Error(`Model listing failed: ${response.status}`);
-      values = (await response.json()).data?.map((model) => model.id) ?? [];
+      records = (await response.json()).data ?? [];
+    }
+    let values = records.map((model) => model.id).filter(Boolean);
+    this.modelInfoCache = new Map(
+      records.flatMap((model) => {
+        if (!model?.id) return [];
+        const contextWindow = modelContextWindow(model);
+        return [
+          [
+            model.id,
+            {
+              id: model.id,
+              ...(contextWindow ? { contextWindow } : {}),
+            },
+          ],
+        ];
+      }),
+    );
+    if (hostname(this.options.baseURL) === NVIDIA_HOST) {
+      const catalogURL = new URL(NVIDIA_CATALOG_URL);
+      catalogURL.searchParams.set('q', JSON.stringify({ query: '*', page: 0, pageSize: 200 }));
+      catalogURL.searchParams.set('group-labels-by-labelset', 'true');
+      const response = await this.request(catalogURL, {
+        headers: { accept: 'application/json' },
+        signal,
+      });
+      if (!response.ok)
+        throw Object.assign(
+          new Error(`NVIDIA deployable chat-model listing failed: ${response.status}`),
+          { status: response.status },
+        );
+      const catalog = await response.json();
+      const resources = (catalog.results ?? []).flatMap((group) => group.resources ?? []);
+      values = filterNvidiaChatModels(values, resources);
+      this.modelInfoCache = new Map([...this.modelInfoCache].filter(([id]) => values.includes(id)));
     }
     this.modelCache = { values: [...values], expiresAt: Date.now() + 30_000 };
     return values;
@@ -75,6 +300,7 @@ export class OpenAICompatibleProvider {
     return ids.map((id) => ({
       id,
       ...modelCatalog.find((item) => item.id === id),
+      ...this.modelInfoCache.get(id),
       provider: this.options.baseURL,
     }));
   }
@@ -96,6 +322,7 @@ export class OpenAICompatibleProvider {
     return {
       id: match,
       ...modelCatalog.find((item) => item.id === match),
+      ...this.modelInfoCache.get(match),
       provider: this.options.baseURL,
     };
   }
@@ -110,19 +337,22 @@ export class OpenAICompatibleProvider {
       return result;
     } catch (error) {
       const next = (this.options.fallbackModels ?? [])[this.fallbackIndex + 1];
-      if (!next || (error instanceof Error && error.name === 'AbortError')) throw error;
+      if (!next || (error instanceof Error && error.name === 'AbortError'))
+        throw normalizeChatError(error, this.activeModel(), this.options.baseURL);
       this.fallbackIndex += 1;
       return this.chat(messages, tools, events, signal);
     }
   }
   async sdkChat(messages, tools, events, signal) {
+    const model = this.activeModel();
     const request = {
-      model: this.activeModel(),
-      messages: messages.map(toOpenAIMessage),
+      model,
+      messages: this.wireMessages(messages, model),
       tools: tools,
       ...(this.options.temperature === undefined ? {} : { temperature: this.options.temperature }),
       ...(this.options.maxTokens === undefined ? {} : { max_tokens: this.options.maxTokens }),
       ...(this.options.topP === undefined ? {} : { top_p: this.options.topP }),
+      ...this.reasoningParameters(model),
     };
     if (this.options.stream === false)
       return this.fromCompletion(
@@ -212,6 +442,14 @@ export class OpenAICompatibleProvider {
   }
   async fetchChat(messages, tools, events, signal) {
     const wantStream = this.options.stream !== false;
+    const model = this.activeModel();
+    const requestSignal =
+      this.options.timeoutMs && this.options.timeoutMs > 0
+        ? AbortSignal.any([
+            ...(signal ? [signal] : []),
+            AbortSignal.timeout(this.options.timeoutMs),
+          ])
+        : signal;
     const response = await this.request(
       `${this.options.baseURL.replace(/\/$/, '')}/chat/completions`,
       {
@@ -221,10 +459,10 @@ export class OpenAICompatibleProvider {
           'content-type': 'application/json',
           ...(wantStream ? { accept: 'text/event-stream' } : {}),
         },
-        signal,
+        signal: requestSignal,
         body: JSON.stringify({
-          model: this.activeModel(),
-          messages: messages.map(toOpenAIMessage),
+          model,
+          messages: this.wireMessages(messages, model),
           tools,
           stream: wantStream,
           ...(wantStream ? { stream_options: { include_usage: true } } : {}),
@@ -233,6 +471,7 @@ export class OpenAICompatibleProvider {
             : { temperature: this.options.temperature }),
           ...(this.options.maxTokens === undefined ? {} : { max_tokens: this.options.maxTokens }),
           ...(this.options.topP === undefined ? {} : { top_p: this.options.topP }),
+          ...this.reasoningParameters(model),
         }),
       },
     );
@@ -369,6 +608,19 @@ export class OpenAICompatibleProvider {
   headers() {
     return this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {};
   }
+  wireMessages(messages, model = this.activeModel()) {
+    const includeReasoningContent = !shouldStripReasoningHistory(this.options.baseURL, model);
+    const prepared = supportsNvidiaReasoningEffort(this.options.baseURL, model)
+      ? prepareNvidiaGptOssMessages(messages)
+      : messages;
+    return prepared.map((message) => toOpenAIMessage(message, { includeReasoningContent }));
+  }
+  reasoningParameters(model = this.activeModel()) {
+    return supportsNvidiaReasoningEffort(this.options.baseURL, model) &&
+      this.options.reasoningEffort
+      ? { reasoning_effort: this.options.reasoningEffort }
+      : {};
+  }
   activeModel() {
     return this.fallbackIndex < 0
       ? this.options.model
@@ -404,6 +656,7 @@ export class CapyProviderAdapter {
       );
     return {
       id: match.id,
+      ...modelCatalog.find((item) => item.id === match.id),
       provider: this.client.baseURL,
       supportsTools: true,
     };

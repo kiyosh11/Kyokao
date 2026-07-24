@@ -1,6 +1,7 @@
 import type { CodeThemeName, TuiThemeName } from '@kyokao/themes';
 
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto';
+export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 export interface McpServerConfig {
   command: string;
@@ -23,6 +24,8 @@ export interface ProviderConfig {
   fallbackModels?: string[];
 
   stream?: boolean;
+  reasoningEffort?: ReasoningEffort;
+  timeoutMs?: number;
   projectId?: string;
 
   speed?: 'fast' | 'standard';

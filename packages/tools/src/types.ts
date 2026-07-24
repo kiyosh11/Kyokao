@@ -1,5 +1,3 @@
-
-
 export type ApprovalMode = 'suggest' | 'auto-edit' | 'full-auto';
 export type Approve = (action: string, detail: string) => Promise<boolean>;
 
