@@ -257,8 +257,8 @@ describe('code and Markdown rendering', () => {
       expect(body.every((row) => displayWidth(row) <= terminalWidth)).toBe(true);
     },
   );
-  it('renders user pill, free assistant text, and diamond tool bullets', () => {
-    const transcript = renderTranscript(
+  it('renders clean user text, free assistant text, and diamond tool bullets', () => {
+    const rendered = renderTranscript(
       [
         { kind: 'user', text: 'Build it', timestamp: '8:19 AM' },
         { kind: 'reasoning', text: 'Inspecting the repository.' },
@@ -267,7 +267,12 @@ describe('code and Markdown rendering', () => {
       ],
       80,
       context,
-    ).map(stripAnsi);
+    );
+    const userRow = rendered.find((row) => stripAnsi(row).includes('❯ Build it'));
+    expect(userRow).toBeDefined();
+    expect(userRow).not.toMatch(/\x1b\[48/);
+    expect(displayWidth(userRow!)).toBeLessThan(80);
+    const transcript = rendered.map(stripAnsi);
     expect(transcript.some((row) => row.includes('❯ Build it'))).toBe(true);
     expect(transcript.some((row) => row.includes('◆ Thinking'))).toBe(true);
     expect(transcript.some((row) => row.includes('Inspecting the repository.'))).toBe(true);

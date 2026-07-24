@@ -2,6 +2,7 @@
 // @ts-nocheck
 import { Command } from 'commander';
 import { loadConfig } from '@kyokao/config';
+import { modelCatalog } from '@kyokao/providers';
 import { terminalWorkspace, withInteractiveScreen, createThemeContext, createUi } from '@kyokao/ui';
 import { buildRuntime, createBackend as createBackendFor, runPrompt } from './runtime.js';
 import { runHeadless, resolveOutputFormat } from './headless.js';
@@ -129,8 +130,11 @@ async function runTui(screen, needsSetup) {
   let r = await runtime({}, approve);
   themeContext.setTuiTheme(r.config.theme);
   themeContext.setCodeTheme(r.config.codeTheme);
-  let backend = await createBackendFor(r, undefined, !!program.opts().skipModelCheck);
   const skipModelCheck = !!program.opts().skipModelCheck;
+  // Keep the TUI reachable when a provider retires the saved model. The model
+  // palette itself uses the validated live list, and newly selected models are
+  // checked during the runtime swap.
+  let backend = await createBackendFor(r, undefined, true);
   const backendProxy = {
     get provider() {
       return backend.provider;
@@ -178,21 +182,119 @@ async function runTui(screen, needsSetup) {
   let sessionChoices = await r.store.listSessions();
   let memoryChoices = await r.store.getMemory();
   let providerModels = [];
+  let modelContextWindow = modelCatalog.find(
+    (model) => model.id === r.providerOptions.model,
+  )?.contextWindow;
+  let capyAvailableModels = [];
+  let capyThreadChoices = [];
+  let capySpending;
+  let capySpendingError;
+  let capySpendingRuntime;
+  let capySpendingExpiresAt = 0;
   const refreshProviderModels = async () => {
     const current = r;
     try {
       const signal = AbortSignal.timeout(3_000);
-      const models = current.capy
-        ? (await current.capy.models(signal))
-            .filter((model) => model.captainEligible)
-            .map((model) => model.id)
-        : await current.provider.models(signal);
-      if (r === current) providerModels = models;
+      if (current.capy) {
+        const models = await current.capy.models(signal);
+        if (r === current) {
+          capyAvailableModels = models;
+          providerModels = models.filter((model) => model.captainEligible).map((model) => model.id);
+          modelContextWindow = modelCatalog.find(
+            (model) => model.id === current.providerOptions.model,
+          )?.contextWindow;
+        }
+      } else {
+        const models = await current.provider.models(signal);
+        const modelInfo = await current.provider.validateModel();
+        if (r === current) {
+          capyAvailableModels = [];
+          providerModels = models;
+          modelContextWindow =
+            modelInfo.contextWindow ??
+            modelCatalog.find((model) => model.id === current.providerOptions.model)?.contextWindow;
+        }
+      }
     } catch {
-      if (r === current) providerModels = [];
+      if (r === current) {
+        capyAvailableModels = [];
+        providerModels = [];
+        modelContextWindow = modelCatalog.find(
+          (model) => model.id === current.providerOptions.model,
+        )?.contextWindow;
+      }
     }
   };
-  void refreshProviderModels();
+  const refreshCapyThreads = async () => {
+    const current = r;
+    const projectId = current.config.providers.capy?.projectId;
+    if (current.config.provider !== 'capy' || !current.capy || !projectId) {
+      if (r === current) capyThreadChoices = [];
+      return;
+    }
+    try {
+      const threads = await current.capy.listThreads(
+        { projectId, limit: 50 },
+        AbortSignal.timeout(10_000),
+      );
+      if (r === current) capyThreadChoices = threads;
+    } catch {
+      if (r === current) capyThreadChoices = [];
+    }
+  };
+  const refreshCapySpending = async (force = false) => {
+    const current = r;
+    const projectId = current.config.providers.capy?.projectId;
+    if (current.config.provider !== 'capy' || !current.capy || !projectId) {
+      if (r === current) {
+        capySpending = undefined;
+        capySpendingError = undefined;
+      }
+      return;
+    }
+    if (!force && capySpendingRuntime === current && capySpendingExpiresAt > Date.now()) return;
+    const now = new Date();
+    const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+    try {
+      const usage = await current.capy.getUsage(
+        {
+          orgId: 'me',
+          from,
+          to: now.toISOString(),
+          routed: 'paid',
+          projectIds: projectId,
+          pageSize: 1,
+        },
+        AbortSignal.timeout(10_000),
+      );
+      if (r === current) {
+        capySpending = {
+          ...usage.totals,
+          from: usage.from,
+          to: usage.to,
+        };
+        capySpendingError = undefined;
+        capySpendingRuntime = current;
+        capySpendingExpiresAt = Date.now() + 15_000;
+      }
+    } catch (error) {
+      if (r === current) {
+        capySpending = undefined;
+        capySpendingError = error instanceof Error ? error.message : String(error);
+        capySpendingRuntime = current;
+        capySpendingExpiresAt =
+          error && typeof error === 'object' && [401, 403].includes(Number(error.status))
+            ? Number.POSITIVE_INFINITY
+            : Date.now() + 30_000;
+      }
+    }
+  };
+  if (r.config.provider === 'capy')
+    await Promise.all([refreshProviderModels(), refreshCapyThreads(), refreshCapySpending()]);
+  else {
+    void refreshProviderModels();
+    await refreshCapyThreads();
+  }
   // The shared context object: its fields are reassigned by replaceRuntime
   // and the extracted handlers, so they read/write through this object.
   const ctx = {
@@ -221,20 +323,38 @@ async function runTui(screen, needsSetup) {
     get providerModels() {
       return providerModels;
     },
-    replaceRuntime,
-    refreshProviderModels: () => {
-      void refreshProviderModels();
+    get modelContextWindow() {
+      return modelContextWindow;
     },
+    get capyThreadChoices() {
+      return capyThreadChoices;
+    },
+    get capyAvailableModels() {
+      return capyAvailableModels;
+    },
+    set capyAvailableModels(value) {
+      capyAvailableModels = value;
+    },
+    get capySpending() {
+      return capySpending;
+    },
+    get capySpendingError() {
+      return capySpendingError;
+    },
+    replaceRuntime,
+    refreshProviderModels,
+    refreshCapyThreads,
+    refreshCapySpending,
     skipModelCheck,
     projectChoices: [],
     capyModelChoices: [],
-    capyAvailableModels: [],
     capyModelRole: undefined,
   };
   try {
     await terminalWorkspace({
       screen,
       themeContext,
+      initialDraft: capyThreadChoices.length ? '/resume ' : undefined,
       backend: backendProxy,
       onApprovalHandler: (handler) => {
         requestApproval = handler;
@@ -251,6 +371,7 @@ async function runTui(screen, needsSetup) {
       },
       onSessionChange: async () => {
         sessionChoices = await r.store.listSessions();
+        await refreshCapySpending();
       },
       commandPalette: (value) => buildCommandPalette(value, ctx),
       header: () => ({
@@ -260,11 +381,14 @@ async function runTui(screen, needsSetup) {
             : r.root.replace(process.env.HOME ?? process.env.USERPROFILE ?? '', '~'),
         provider: r.config.provider,
         model: r.config.model,
+        buildModel: r.config.provider === 'capy' ? r.config.providers.capy?.buildModel : undefined,
+        spendingUsd: r.config.provider === 'capy' ? capySpending?.totalDollars : undefined,
+        spendingLabel: r.config.provider === 'capy' ? 'project MTD' : undefined,
         approval: r.config.approval,
       }),
       sessionTitle: () => backend.session()?.task ?? '',
       sessionPlan: () => backend.session()?.plan ?? [],
-      contextWindow: () => r.config.contextWindow,
+      contextWindow: () => modelContextWindow,
       contextTokens: () => {
         const messages = backend.session()?.messages;
         if (!messages?.length) return 0;

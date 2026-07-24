@@ -399,8 +399,12 @@ export function registerCommands(deps: CommandDeps): void {
         const r = await runtime();
         try {
           if (r.capy) {
-            for (const model of (await r.capy.models()).filter((m) => m.captainEligible))
-              console.log(`${model.id}\t${model.name}\t${model.provider}`);
+            for (const model of await r.capy.models())
+              console.log(
+                `${model.id}\t${model.name}\t${model.provider}\t${
+                  model.captainEligible ? 'Captain + Build' : 'Build'
+                }`,
+              );
           } else for (const m of await r.provider.models()) console.log(m);
         } finally {
           await r.tools.close?.();
@@ -501,12 +505,16 @@ export function registerCommands(deps: CommandDeps): void {
             const model = models.find(
               (item) => item.id === r.providerOptions.model && item.captainEligible,
             );
+            const buildModelId = r.config.providers.capy?.buildModel;
+            const buildModel = models.find((item) => item.id === buildModelId);
             const projectId = r.config.providers.capy?.projectId;
             const project = projects.find((item) => item.id === projectId);
             if (!model)
               throw new Error(`Capy model "${r.providerOptions.model}" is not Captain eligible`);
+            if (!buildModel) throw new Error(`Capy Build model "${buildModelId}" is unavailable`);
             if (!project) throw new Error(`Capy project "${projectId}" is not accessible`);
-            console.log(`model: ${model.id} (Captain eligible)`);
+            console.log(`Captain model: ${model.id} (eligible)`);
+            console.log(`Build model: ${buildModel.id}`);
             console.log(`project: ${project.name} (${project.id})`);
             console.log(
               'execution: remote connected repositories/VMs; local uncommitted files are not used',

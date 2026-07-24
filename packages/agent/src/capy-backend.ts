@@ -39,7 +39,13 @@ export class CapyRemoteBackend {
         );
       await this.options.client.sendMessage(
         this.current.remote.threadId,
-        { message: remotePrompt, model: this.options.model },
+        {
+          message: remotePrompt,
+          model: this.options.model,
+          ...(this.options.threadDefaults?.buildModel
+            ? { buildModel: this.options.threadDefaults.buildModel }
+            : {}),
+        },
         signal,
       );
     } else {

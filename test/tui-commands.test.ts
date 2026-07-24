@@ -67,12 +67,16 @@ describe('TUI slash command integration', () => {
       sessionChoices: [],
       memoryChoices: {},
       providerModels: ['old-model', 'new-model'],
+      modelContextWindow: undefined,
       projectChoices: [],
       capyModelChoices: [],
       capyAvailableModels: [],
       capyModelRole: undefined,
+      capyThreadChoices: [],
       skipModelCheck: true,
       refreshProviderModels: vi.fn(),
+      refreshCapyThreads: vi.fn(async () => {}),
+      refreshCapySpending: vi.fn(async () => {}),
       replaceRuntime: vi.fn(async (overrides: any, options: any = {}) => {
         await options.beforeSwap?.();
         ctx.r = {
@@ -224,6 +228,55 @@ describe('TUI slash command integration', () => {
     });
   });
 
+  it('applies NVIDIA GPT-OSS reasoning settings to the live provider and persistence', async () => {
+    ctx.r.config.provider = 'nvidia';
+    ctx.r.config.model = 'openai/gpt-oss-120b';
+    ctx.r.providerOptions = {
+      baseURL: 'https://integrate.api.nvidia.com/v1',
+      model: 'openai/gpt-oss-120b',
+      reasoningEffort: 'medium',
+    };
+    ctx.r.provider = {
+      baseURL: 'https://integrate.api.nvidia.com/v1',
+      options: {
+        baseURL: 'https://integrate.api.nvidia.com/v1',
+        model: 'openai/gpt-oss-120b',
+        reasoningEffort: 'medium',
+      },
+    };
+
+    expect(buildCommandPalette('/settings', ctx)?.map((choice) => choice.label)).toContain(
+      'Reasoning effort',
+    );
+    expect(
+      buildCommandPalette('/settings reasoning-effort ', ctx)?.map((choice) => choice.completion),
+    ).toEqual([
+      '/settings reasoning-effort low',
+      '/settings reasoning-effort medium',
+      '/settings reasoning-effort high',
+    ]);
+
+    const hidden = await run('/settings thinking off');
+    expect(hidden?.messages?.[0]?.text).toContain('low reasoning effort');
+    expect(ctx.r.providerOptions.reasoningEffort).toBe('low');
+    expect(ctx.r.provider.options.reasoningEffort).toBe('low');
+    expect(await readConfig(join(home, 'config.json'))).toMatchObject({
+      providers: { nvidia: { reasoningEffort: 'low' } },
+      tui: { showThinking: false },
+    });
+
+    const high = await run('/settings reasoning-effort high');
+    expect(high?.messages?.[0]?.text).toContain('high');
+    expect(ctx.r.providerOptions.reasoningEffort).toBe('high');
+    expect(ctx.r.provider.options.reasoningEffort).toBe('high');
+    expect(await readConfig(join(home, 'config.json'))).toMatchObject({
+      providers: { nvidia: { reasoningEffort: 'high' } },
+    });
+
+    await run('/settings thinking on');
+    expect(ctx.r.providerOptions.reasoningEffort).toBe('medium');
+  });
+
   it('stages a Capy key safely across multi-project selection without activating invalid config', async () => {
     control.promptSecret.mockResolvedValueOnce('capy-token');
     vi.stubGlobal(
@@ -363,6 +416,132 @@ describe('TUI slash command integration', () => {
     expect(saved.providers?.capy?.apiKey).toBeUndefined();
   });
 
+  it('pulls Capy role models from the API and changes Captain and Build independently', async () => {
+    const models = [
+      {
+        id: 'captain-old',
+        name: 'Captain Old',
+        provider: 'openai',
+        captainEligible: true,
+      },
+      {
+        id: 'captain-new',
+        name: 'Captain New',
+        provider: 'openai',
+        captainEligible: true,
+      },
+      {
+        id: 'builder-new',
+        name: 'Builder New',
+        provider: 'anthropic',
+        captainEligible: false,
+      },
+    ];
+    ctx.r.config.provider = 'capy';
+    ctx.r.config.model = 'captain-old';
+    ctx.r.config.providers.capy = {
+      apiKey: 'capy-token',
+      projectId: 'project-1',
+      model: 'captain-old',
+      buildModel: 'captain-old',
+    };
+    ctx.r.capy = { models: vi.fn(async () => models) };
+    ctx.r.providerOptions = { apiKey: 'capy-token', model: 'captain-old' };
+    ctx.refreshProviderModels.mockImplementation(async () => {
+      ctx.capyAvailableModels = await ctx.r.capy.models();
+      ctx.providerModels = ctx.capyAvailableModels
+        .filter((model: any) => model.captainEligible)
+        .map((model: any) => model.id);
+    });
+    await ctx.refreshProviderModels();
+
+    expect(buildCommandPalette('/settings ', ctx)?.map((choice) => choice.label)).toEqual(
+      expect.arrayContaining(['Captain model', 'Build model']),
+    );
+    expect(
+      buildCommandPalette('/settings captain-model ', ctx)?.map((choice) => choice.completion),
+    ).toEqual(
+      expect.arrayContaining([
+        '/settings captain-model captain-old',
+        '/settings captain-model captain-new',
+      ]),
+    );
+    expect(
+      buildCommandPalette('/settings captain-model ', ctx)?.map((choice) => choice.completion),
+    ).not.toContain('/settings captain-model builder-new');
+    expect(
+      buildCommandPalette('/settings build-model ', ctx)?.map((choice) => choice.completion),
+    ).toContain('/settings build-model builder-new');
+
+    const captain = await run('/settings captain-model captain-new');
+    expect(captain?.messages?.[0]?.text).toContain('Captain captain-new');
+    expect(ctx.r.config.model).toBe('captain-new');
+    expect(ctx.r.config.providers.capy.buildModel).toBe('captain-old');
+
+    const builder = await run('/settings build-model builder-new');
+    expect(builder?.messages?.[0]?.text).toContain('Build builder-new');
+    expect(ctx.r.config.model).toBe('captain-new');
+    expect(ctx.r.config.providers.capy.buildModel).toBe('builder-new');
+    expect(ctx.replaceRuntime).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        model: 'captain-new',
+        providers: expect.objectContaining({
+          capy: expect.objectContaining({
+            model: 'captain-new',
+            buildModel: 'builder-new',
+          }),
+        }),
+      }),
+      { preserveCompatibleSession: true },
+    );
+    expect(await readConfig(join(home, 'config.json'))).toMatchObject({
+      provider: 'capy',
+      model: 'captain-new',
+      providers: {
+        capy: {
+          model: 'captain-new',
+          buildModel: 'builder-new',
+        },
+      },
+    });
+  });
+
+  it('shows live Capy project spending and explains missing billing permission', async () => {
+    ctx.r.config.provider = 'capy';
+    ctx.r.config.providers.capy = { projectId: 'project-1' };
+    ctx.r.capy = {};
+    ctx.capySpending = {
+      totalDollars: 4.5,
+      llmDollars: 4,
+      vmDollars: 0.5,
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-24T12:00:00.000Z',
+    };
+
+    const usage = await run('/usage');
+    expect(ctx.refreshCapySpending).toHaveBeenCalledWith(true);
+    expect(usage?.messages?.[0]?.text).toContain('total: $4.50');
+    expect(usage?.messages?.[0]?.text).toContain('llm:   $4.00');
+    expect(usage?.messages?.[0]?.text).toContain('vm:    $0.50');
+
+    ctx.capySpending = undefined;
+    ctx.capySpendingError = 'You do not have permission to perform this action';
+    const denied = await run('/usage');
+    expect(denied?.messages?.[0]).toMatchObject({ kind: 'error' });
+    expect(denied?.messages?.[0]?.text).toContain('Billing or usage permission may be required');
+  });
+
+  it('reports model capacity separately from the local compression budget', async () => {
+    currentSession = await store.create('context check', root);
+    currentSession.messages = [{ role: 'user', content: 'small transcript' }];
+    ctx.modelContextWindow = 1_000_000;
+
+    const result = await run('/context');
+    expect(result?.messages?.[0]?.text).toContain('model context:');
+    expect(result?.messages?.[0]?.text).toContain('/ 1,000,000 tokens');
+    expect(result?.messages?.[0]?.text).toContain('agent compress at: 12,800 tokens');
+  });
+
   it('persists goal/personality, renders raw mode, and creates instructions without overwrite', async () => {
     currentSession = await store.create('task', root);
     expect((await run('/goal finish the audit'))?.messages?.[0]?.text).toContain(
@@ -430,6 +609,74 @@ describe('TUI slash command integration', () => {
         { kind: 'assistant', text: 'original answer' },
       ]),
     );
+  });
+
+  it('loads remote thread history from the selected Capy project', async () => {
+    const thread = {
+      id: 'thread-remote-1',
+      projectId: 'project-1',
+      title: 'Remote Capy conversation',
+      status: 'completed',
+      runState: 'ready',
+      waitingOn: [],
+      blockedOn: [],
+      pendingWakeups: 0,
+      tasks: [],
+      participants: [],
+      pullRequests: [],
+      slackThreads: [],
+      tags: [],
+      createdAt: '2026-07-20T10:00:00.000Z',
+      updatedAt: '2026-07-20T10:05:00.000Z',
+    };
+    ctx.r.config.provider = 'capy';
+    ctx.r.config.model = 'capy-model';
+    ctx.r.config.providers.capy = { projectId: 'project-1', model: 'capy-model' };
+    ctx.r.providerOptions.model = 'capy-model';
+    ctx.r.capy = {
+      getThread: vi.fn(async () => thread),
+      messages: vi.fn(async () => [
+        {
+          id: 'message-user',
+          source: 'user',
+          content: 'remote request',
+          createdAt: '2026-07-20T10:00:00.000Z',
+        },
+        {
+          id: 'message-assistant',
+          source: 'assistant',
+          content: 'remote answer',
+          createdAt: '2026-07-20T10:01:00.000Z',
+        },
+      ]),
+    };
+    ctx.capyThreadChoices = [thread];
+
+    expect(buildCommandPalette('/resume', ctx)?.[0]).toMatchObject({
+      label: 'Remote Capy conversation',
+      completion: '/resume capy:thread-remote-1',
+    });
+    const result = await run('/resume capy:thread-remote-1');
+
+    expect(result?.clear).toBe(true);
+    expect(result?.messages).toEqual(
+      expect.arrayContaining([
+        { kind: 'user', text: 'remote request' },
+        { kind: 'assistant', text: 'remote answer' },
+      ]),
+    );
+    expect(ctx.backend.status()).toMatchObject({
+      provider: 'capy',
+      projectId: 'project-1',
+      threadId: 'thread-remote-1',
+    });
+    const imported = (await store.listSessions()).find(
+      (session) => session.remote?.threadId === 'thread-remote-1',
+    );
+    expect(imported?.messages).toEqual([
+      { role: 'user', content: 'remote request' },
+      { role: 'assistant', content: 'remote answer' },
+    ]);
   });
 
   it('rebuilds the visible transcript after rewinding the latest turn', async () => {

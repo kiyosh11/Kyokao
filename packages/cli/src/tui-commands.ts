@@ -17,7 +17,12 @@ import {
   saveGlobalThemes,
   saveProviderSelection,
 } from '@kyokao/config';
-import { CapyClient, type CapyTagColor } from '@kyokao/providers';
+import {
+  CapyClient,
+  supportsNvidiaReasoningEffort,
+  type CapyTagColor,
+  type ReasoningEffort,
+} from '@kyokao/providers';
 import { isCodeThemeName, isTuiThemeName } from '@kyokao/themes';
 import type {
   ParsedCommand,
@@ -43,6 +48,15 @@ const CAPY_TAG_COLORS = new Set<CapyTagColor>([
   'orange',
   'lime',
 ]);
+
+function setLiveReasoningEffort(r: TuiContext['r'], effort: ReasoningEffort): void {
+  r.config.providers[r.config.provider] = {
+    ...(r.config.providers[r.config.provider] ?? {}),
+    reasoningEffort: effort,
+  };
+  r.providerOptions.reasoningEffort = effort;
+  if (r.provider?.options) r.provider.options.reasoningEffort = effort;
+}
 
 function capyUsageBoundary(value: string | undefined, endOfDay: boolean): string {
   if (!value) {
@@ -170,6 +184,57 @@ async function resumeSession(
     clear: true,
     messages: [...messages, { kind: 'system', text: `Resumed: ${title}` }],
   };
+}
+
+async function resumeCapyThread(
+  ctx: TuiContext,
+  control: WorkspaceControl,
+  emit: WorkspaceEmit,
+  threadId: string,
+): Promise<WorkspaceCommandResult> {
+  const { r } = ctx;
+  const projectId = r.config.providers.capy?.projectId;
+  if (r.config.provider !== 'capy' || !r.capy || !projectId)
+    return {
+      messages: [{ kind: 'error', text: 'Select a Capy project before resuming its history.' }],
+    };
+  const local = (await r.store.listSessions()).find(
+    (session) =>
+      session.remote?.provider === 'capy' &&
+      session.remote.projectId === projectId &&
+      session.remote.threadId === threadId,
+  );
+  if (local) return resumeSession(ctx, control, emit, local.id);
+  const thread =
+    ctx.capyThreadChoices.find((candidate) => candidate.id === threadId) ??
+    (await r.capy.getThread(threadId, AbortSignal.timeout(10_000)));
+  if (thread.projectId !== projectId)
+    return {
+      messages: [
+        {
+          kind: 'error',
+          text: `Capy thread ${threadId} belongs to a different project.`,
+        },
+      ],
+    };
+  const session = await r.store.create(
+    thread.title?.trim() || `Capy thread ${thread.id.slice(0, 12)}`,
+    r.root,
+  );
+  session.provider = 'capy';
+  session.checkpoint = `remote ${thread.runState}`;
+  session.remote = {
+    provider: 'capy',
+    projectId,
+    threadId: thread.id,
+    runState: thread.runState,
+  };
+  await r.store.saveSession(session);
+  ctx.sessionChoices = [
+    session,
+    ...ctx.sessionChoices.filter((candidate) => candidate.id !== session.id),
+  ];
+  return resumeSession(ctx, control, emit, session.id);
 }
 
 export async function handleTuiCommand(
@@ -361,14 +426,26 @@ export async function handleTuiCommand(
   }
   if (command.name === 'settings') {
     const section = command.args[0]?.toLowerCase();
+    const reasoningSupported = supportsNvidiaReasoningEffort(
+      r.providerOptions.baseURL,
+      r.providerOptions.model,
+    );
     if (!section)
       return {
         messages: [
           {
             text: [
               `Thinking: ${r.config.tui.showThinking ? 'on' : 'off'}`,
+              ...(reasoningSupported
+                ? [`Reasoning effort: ${r.providerOptions.reasoningEffort ?? 'medium'}`]
+                : []),
               `Provider: ${r.config.provider}`,
-              `Model: ${r.config.model}`,
+              ...(r.config.provider === 'capy'
+                ? [
+                    `Captain model: ${r.config.model}`,
+                    `Build model: ${r.config.providers.capy?.buildModel ?? 'not selected'}`,
+                  ]
+                : [`Model: ${r.config.model}`]),
               `Permissions: ${r.config.approval}`,
               `TUI theme: ${r.config.theme}`,
               `Code theme: ${r.config.codeTheme}`,
@@ -380,7 +457,139 @@ export async function handleTuiCommand(
           },
         ],
       };
-    const value = command.args[1]?.toLowerCase();
+    const requestedValue = command.args[1];
+    const value = requestedValue?.toLowerCase();
+    if (section === 'captain-model' || section === 'build-model') {
+      if (r.config.provider !== 'capy' || !r.capy)
+        return {
+          messages: [
+            {
+              kind: 'error',
+              text: 'Captain and Build model settings are available when Capy is active.',
+            },
+          ],
+          prefill: '/settings',
+        };
+      const busyResult = idleError(control, 'change Capy models');
+      if (busyResult) return busyResult;
+      await ctx.refreshProviderModels();
+      const available = ctx.capyAvailableModels.filter(
+        (model) => section === 'build-model' || model.captainEligible,
+      );
+      if (!available.length)
+        return {
+          messages: [
+            {
+              kind: 'error',
+              text:
+                section === 'captain-model'
+                  ? 'Capy returned no Captain-eligible models for this account.'
+                  : 'Capy returned no Build models for this account.',
+            },
+          ],
+          prefill: `/settings ${section} `,
+        };
+      if (!requestedValue || command.args.length !== 2)
+        return {
+          messages: [
+            {
+              kind: 'error',
+              text: `Choose a ${section === 'captain-model' ? 'Captain' : 'Build'} model from the Capy API list.`,
+            },
+          ],
+          prefill: `/settings ${section} `,
+        };
+      const selected = available.find(
+        (model) => model.id.toLowerCase() === requestedValue.toLowerCase(),
+      );
+      if (!selected)
+        return {
+          messages: [
+            {
+              kind: 'error',
+              text: `Capy does not expose "${requestedValue}" as a ${
+                section === 'captain-model' ? 'Captain' : 'Build'
+              } model for this account.`,
+            },
+          ],
+          prefill: `/settings ${section} `,
+        };
+      const configured = r.config.providers.capy ?? {};
+      const captainModel = section === 'captain-model' ? selected.id : r.config.model;
+      const buildModel =
+        section === 'build-model' ? selected.id : (configured.buildModel ?? selected.id);
+      const alreadyActive =
+        section === 'captain-model'
+          ? selected.id === r.config.model
+          : selected.id === configured.buildModel;
+      if (alreadyActive)
+        return {
+          messages: [
+            {
+              text: `${section === 'captain-model' ? 'Captain' : 'Build'} model ${selected.id} is already active.`,
+            },
+          ],
+          prefill: '/settings',
+        };
+      const capyConfig = {
+        ...configured,
+        model: captainModel,
+        buildModel,
+      };
+      await ctx.replaceRuntime(
+        {
+          model: captainModel,
+          providers: { ...r.config.providers, capy: capyConfig },
+        },
+        { preserveCompatibleSession: true },
+      );
+      await saveGlobalConfigPatch({
+        provider: 'capy',
+        model: captainModel,
+        providers: { capy: capyConfig },
+      });
+      await ctx.refreshProviderModels();
+      return {
+        messages: [
+          {
+            text: `Capy models updated · Captain ${captainModel} · Build ${buildModel}. The next turn will use both selections.`,
+          },
+        ],
+        prefill: '/settings',
+      };
+    }
+    if (section === 'reasoning-effort') {
+      if (!reasoningSupported)
+        return {
+          messages: [
+            {
+              kind: 'error',
+              text: 'The active model does not expose NVIDIA GPT-OSS reasoning effort.',
+            },
+          ],
+          prefill: '/settings',
+        };
+      if (!['low', 'medium', 'high'].includes(value ?? '') || command.args.length !== 2)
+        return {
+          messages: [
+            { kind: 'error', text: 'Usage: /settings reasoning-effort <low|medium|high>' },
+          ],
+          prefill: '/settings reasoning-effort ',
+        };
+      const reasoningEffort = value as ReasoningEffort;
+      setLiveReasoningEffort(r, reasoningEffort);
+      await saveGlobalConfigPatch({
+        providers: { [r.config.provider]: { reasoningEffort } },
+      });
+      return {
+        messages: [
+          {
+            text: `NVIDIA reasoning effort changed to ${reasoningEffort}. The next request will use it immediately.`,
+          },
+        ],
+        prefill: '/settings',
+      };
+    }
     if (section === 'theme') {
       if (!value || command.args.length !== 2 || !isTuiThemeName(value))
         return {
@@ -434,13 +643,22 @@ export async function handleTuiCommand(
       };
     const showThinking = value === 'on';
     r.config.tui = { ...r.config.tui, showThinking };
-    await saveGlobalConfigPatch({ tui: { showThinking } });
+    const reasoningEffort = reasoningSupported ? (showThinking ? 'medium' : 'low') : undefined;
+    if (reasoningEffort) setLiveReasoningEffort(r, reasoningEffort);
+    await saveGlobalConfigPatch({
+      tui: { showThinking },
+      ...(reasoningEffort ? { providers: { [r.config.provider]: { reasoningEffort } } } : {}),
+    });
     return {
       messages: [
         {
-          text: showThinking
-            ? 'Thinking is visible. Streamed model reasoning will appear in the transcript.'
-            : 'Thinking is hidden. Final answers and tool activity will still stream normally.',
+          text: reasoningEffort
+            ? showThinking
+              ? 'Thinking is visible. NVIDIA GPT-OSS reasoning effort is medium.'
+              : 'Thinking is hidden. NVIDIA GPT-OSS uses low reasoning effort because its API does not provide an off value.'
+            : showThinking
+              ? 'Thinking is visible. Streamed model reasoning will appear in the transcript.'
+              : 'Thinking is hidden. Final answers and tool activity will still stream normally.',
         },
       ],
       prefill: '/settings',
@@ -585,7 +803,7 @@ export async function handleTuiCommand(
             'Enter submit · Tab queue while running · Shift/Alt+Enter newline',
             'Esc interrupt · Ctrl+C cancel/quit · Ctrl+L clear · Ctrl+T transcript',
             'Ctrl+G external editor · Ctrl+O copy last response · ? shortcuts',
-            'Ctrl+R/Ctrl+S history · PgUp/PgDn scroll',
+            'Ctrl+R/Ctrl+S history · Wheel/PgUp/PgDn scroll',
             'Ctrl+A/E start/end · Ctrl+B/F left/right · Ctrl+P/N up/down',
             'Ctrl+U/K kill · Ctrl+W/Alt+D delete word · Ctrl+Y yank',
           ].join('\n'),
@@ -738,9 +956,12 @@ export async function handleTuiCommand(
   }
   if (command.name === 'sessions' || command.name === 'resume') {
     ctx.sessionChoices = await r.store.listSessions();
+    await ctx.refreshCapyThreads();
 
     if (command.args.length === 1) {
       const sessionArg = command.args[0]!;
+      if (sessionArg.startsWith('capy:'))
+        return resumeCapyThread(ctx, control, emit, sessionArg.slice('capy:'.length));
       if (/^\d+$/.test(sessionArg)) {
         const idx = parseInt(sessionArg, 10) - 1;
         const picked = ctx.sessionChoices[idx];
@@ -763,14 +984,41 @@ export async function handleTuiCommand(
     return {
       messages: [
         {
-          text: ctx.sessionChoices.length
-            ? `${ctx.sessionChoices.length} session${ctx.sessionChoices.length === 1 ? '' : 's'}. Use the list above — Enter to open, Ctrl+D to delete.`
-            : 'No saved sessions yet.',
+          text:
+            ctx.sessionChoices.length || ctx.capyThreadChoices.length
+              ? `${ctx.sessionChoices.length} local session(s) · ${ctx.capyThreadChoices.length} Capy project thread(s). Use the list above — Enter to open.`
+              : 'No saved sessions or Capy project threads yet.',
         },
       ],
     };
   }
   if (command.name === 'model') {
+    if (r.config.provider === 'capy') {
+      if (!arg)
+        return {
+          messages: [
+            {
+              text: `Captain model: ${r.config.model}\nBuild model: ${
+                r.config.providers.capy?.buildModel ?? 'not selected'
+              }\nBoth lists are pulled from Capy. Open /settings to change either role.`,
+            },
+          ],
+        };
+      if (command.args.length !== 1)
+        return {
+          messages: [{ kind: 'error', text: 'Usage: /model [captain-model]' }],
+        };
+      return await handleTuiCommand(
+        {
+          name: 'settings',
+          args: ['captain-model', command.args[0]!],
+          raw: `/settings captain-model ${command.args[0]}`,
+        },
+        emit,
+        control,
+        ctx,
+      );
+    }
     if (!arg)
       return {
         messages: [
@@ -930,7 +1178,9 @@ export async function handleTuiCommand(
         ctx.capyModelChoices = [];
         ctx.capyAvailableModels = [];
         ctx.capyModelRole = undefined;
-        void ctx.refreshProviderModels();
+        await ctx.refreshProviderModels();
+        await ctx.refreshCapyThreads();
+        await ctx.refreshCapySpending();
       } catch (error) {
         return {
           messages: [
@@ -939,9 +1189,14 @@ export async function handleTuiCommand(
         };
       }
       return {
+        prefill: ctx.capyThreadChoices.length ? '/resume ' : undefined,
         messages: [
           {
-            text: `Active provider: capy · project ${projectId} · Captain ${captainModel} · Build ${buildModel}`,
+            text: `Active provider: capy · project ${projectId} · Captain ${captainModel} · Build ${buildModel}${
+              ctx.capyThreadChoices.length
+                ? ` · ${ctx.capyThreadChoices.length} existing thread(s); choose one above or press Esc for a new chat`
+                : ''
+            }`,
           },
         ],
       };
@@ -1108,7 +1363,9 @@ export async function handleTuiCommand(
         ...(providerModel ? { model: providerModel } : {}),
         ...(projectId ? { projectId } : {}),
       });
-      void ctx.refreshProviderModels();
+      await ctx.refreshProviderModels();
+      await ctx.refreshCapyThreads();
+      await ctx.refreshCapySpending(true);
     } catch (error) {
       return {
         messages: [{ kind: 'error', text: error instanceof Error ? error.message : String(error) }],
@@ -1197,11 +1454,13 @@ export async function handleTuiCommand(
       const projects = await r.capy!.projects();
       const projectId = r.config.providers.capy?.projectId;
       const model = models.find((item) => item.id === r.config.model && item.captainEligible);
+      const buildModelId = r.config.providers.capy?.buildModel;
+      const buildModel = models.find((item) => item.id === buildModelId);
       const project = projects.find((item) => item.id === projectId);
       return {
         messages: [
           {
-            text: `provider: capy (${redactEndpoint(r.capy!.baseURL)})\ncredentials: ${r.providerOptions.apiKey ? 'configured' : 'missing'}\nmodel: ${model ? `${model.id} (Captain eligible)` : 'unavailable'}\nproject: ${project ? `${project.name} (${project.id})` : 'unavailable'}\nexecution: remote connected repositories/VMs; local uncommitted files are not used`,
+            text: `provider: capy (${redactEndpoint(r.capy!.baseURL)})\ncredentials: ${r.providerOptions.apiKey ? 'configured' : 'missing'}\nCaptain model: ${model ? `${model.id} (eligible)` : 'unavailable'}\nBuild model: ${buildModel?.id ?? 'unavailable'}\nproject: ${project ? `${project.name} (${project.id})` : 'unavailable'}\nexecution: remote connected repositories/VMs; local uncommitted files are not used`,
           },
         ],
       };
@@ -1463,6 +1722,34 @@ export async function handleTuiCommand(
         ],
       };
     }
+    if (!command.args.length) {
+      await ctx.refreshCapySpending(true);
+      if (ctx.capySpending) {
+        const totals = ctx.capySpending;
+        return {
+          messages: [
+            {
+              text: [
+                `Capy project spending ${totals.from} → ${totals.to} (USD)`,
+                `total: $${totals.totalDollars.toFixed(2)}`,
+                `llm:   $${totals.llmDollars.toFixed(2)}`,
+                `vm:    $${totals.vmDollars.toFixed(2)}`,
+              ].join('\n'),
+            },
+          ],
+        };
+      }
+      return {
+        messages: [
+          {
+            kind: 'error',
+            text: `Capy spending is unavailable for this API key${
+              ctx.capySpendingError ? `: ${ctx.capySpendingError}` : '.'
+            } Billing or usage permission may be required.`,
+          },
+        ],
+      };
+    }
     try {
       const [orgId, from, to] = command.args;
       const usage = await r.capy.getUsage(
@@ -1511,6 +1798,10 @@ export async function handleTuiCommand(
     const session = backend.session();
     const budget = r.config.contextWindow;
     const threshold = Math.floor(budget * (r.config.compressionThreshold ?? 0.8));
+    const modelCapacity = ctx.modelContextWindow;
+    const modelCapacityLabel = modelCapacity
+      ? `${modelCapacity.toLocaleString()} tokens`
+      : 'unknown (provider did not expose it)';
     if (!session) {
       return {
         messages: [
@@ -1519,18 +1810,27 @@ export async function handleTuiCommand(
               command.name === 'status'
                 ? [
                     `provider: ${r.config.provider}`,
-                    `model: ${r.config.model}`,
+                    ...(r.config.provider === 'capy'
+                      ? [
+                          `Captain model: ${r.config.model}`,
+                          `Build model: ${r.config.providers.capy?.buildModel ?? 'not selected'}`,
+                          ctx.capySpending
+                            ? `project MTD spending: $${ctx.capySpending.totalDollars.toFixed(2)}`
+                            : 'project MTD spending: unavailable',
+                        ]
+                      : [`model: ${r.config.model}`]),
                     `approval: ${r.config.approval}`,
                     'session: none',
-                    `context budget: ${budget.toLocaleString()} tokens`,
+                    `model context: ${modelCapacityLabel}`,
+                    `agent context budget: ${budget.toLocaleString()} tokens`,
                   ].join('\n')
-                : `Context budget: ${budget.toLocaleString()} tokens (compress at ${threshold.toLocaleString()}).`,
+                : `Model context: ${modelCapacityLabel}\nAgent context budget: ${budget.toLocaleString()} tokens (compress at ${threshold.toLocaleString()}).`,
           },
         ],
       };
     }
     const current = estimateTokens(session.messages);
-    const pct = budget > 0 ? Math.round((current / budget) * 100) : 0;
+    const pct = modelCapacity ? Math.round((current / modelCapacity) * 100) : undefined;
     const usage = session.usage;
     return {
       messages: [
@@ -1539,13 +1839,23 @@ export async function handleTuiCommand(
             ...(command.name === 'status'
               ? [
                   `provider: ${r.config.provider}`,
-                  `model: ${r.config.model}`,
+                  ...(r.config.provider === 'capy'
+                    ? [
+                        `Captain model: ${r.config.model}`,
+                        `Build model: ${r.config.providers.capy?.buildModel ?? 'not selected'}`,
+                        ctx.capySpending
+                          ? `project MTD spending: $${ctx.capySpending.totalDollars.toFixed(2)}`
+                          : 'project MTD spending: unavailable',
+                      ]
+                    : [`model: ${r.config.model}`]),
                   `approval: ${r.config.approval}`,
                   `session: ${session.id}`,
                 ]
               : []),
-            `transcript: ${current.toLocaleString()} / ${budget.toLocaleString()} tokens (${pct}%)`,
-            `compress at: ${threshold.toLocaleString()} tokens`,
+            `model context: ${current.toLocaleString()} / ${
+              modelCapacity ? modelCapacity.toLocaleString() : '?'
+            } tokens${pct == null ? '' : ` (${pct}%)`}`,
+            `agent compress at: ${threshold.toLocaleString()} tokens`,
             usage
               ? `session total: ${usage.totalTokens.toLocaleString()} tokens · ${usage.requests} requests · $${usage.estimatedCostUsd.toFixed(4)}`
               : '',

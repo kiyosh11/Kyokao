@@ -28,6 +28,7 @@ import {
   estimateTokens,
   isFutureIntentOnly,
   loadInstructionFiles,
+  providerRetryLimit,
   systemPrompt,
 } from '@kyokao/agent';
 const servers: Server[] = [];
@@ -121,6 +122,9 @@ describe('configuration', () => {
         temperature: 0.2,
         maxTokens: 500,
         fallbackModels: ['backup'],
+        providers: {
+          nvidia: { reasoningEffort: 'low', timeoutMs: 90000 },
+        },
         limits: { maxToolCalls: 4, maxCostUsd: 1, allowedHosts: ['example.com'] },
         mcp: { demo: { command: 'demo-server', args: ['--stdio'] } },
       }),
@@ -132,6 +136,10 @@ describe('configuration', () => {
     expect(config.editorArgs).toEqual(['--wait']);
     expect(config.temperature).toBe(0.2);
     expect(config.limits.maxToolCalls).toBe(4);
+    expect(config.providers.nvidia).toMatchObject({
+      reasoningEffort: 'low',
+      timeoutMs: 90000,
+    });
   });
   it('requires and resolves a Capy project binding separately from OpenAI settings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-capy-config-'));
@@ -265,6 +273,26 @@ describe('sandbox and tools', () => {
   });
 });
 describe('OpenAI SDK streaming transcript', () => {
+  it('leaves retries to the agent instead of multiplying SDK attempts', async () => {
+    let calls = 0;
+    const server = createServer(async (request, response) => {
+      for await (const chunk of request) void chunk;
+      calls++;
+      response.writeHead(503, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: { message: 'temporarily unavailable' } }));
+    });
+    servers.push(server);
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const address = server.address();
+    const baseURL = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
+    const provider = new OpenAICompatibleProvider({ baseURL, model: 'fake' });
+
+    await expect(provider.chat([{ role: 'user', content: 'go' }], [])).rejects.toThrow(
+      'temporarily unavailable',
+    );
+    expect(calls).toBe(1);
+  });
+
   it('keeps SDK reasoning deltas streaming separately from answer text', async () => {
     const url = await fakeServer(
       () =>
@@ -391,6 +419,19 @@ describe('OpenAI SDK streaming transcript', () => {
       tool_calls: [{ type: 'function', function: { name: 'f', arguments: '{}' } }],
     }));
 });
+
+describe('provider retry policy', () => {
+  it('bounds timeouts and avoids retrying permanent client errors', () => {
+    expect(
+      providerRetryLimit(Object.assign(new Error('Request timed out.'), { name: 'TimeoutError' })),
+    ).toBe(1);
+    expect(providerRetryLimit(Object.assign(new Error('unauthorized'), { status: 401 }))).toBe(0);
+    expect(providerRetryLimit(new Error('Chat request failed: 404 missing'))).toBe(0);
+    expect(providerRetryLimit(Object.assign(new Error('rate limited'), { status: 429 }))).toBe(2);
+    expect(providerRetryLimit(Object.assign(new Error('unavailable'), { status: 503 }))).toBe(2);
+  });
+});
+
 describe('coding completion guard', () => {
   it('continues an intent-only coding response through write execution and verification', async () => {
     const requests: any[] = [];
@@ -631,6 +672,16 @@ describe('platform extensions', () => {
       supportsTools: true,
       contextWindow: 128000,
     });
+    expect(modelCatalog.find((model) => model.id === 'openai/gpt-oss-120b')).toMatchObject({
+      contextWindow: 131072,
+    });
+    expect(modelCatalog.find((model) => model.id === 'google/gemma-3n-e4b-it')).toMatchObject({
+      contextWindow: 32768,
+    });
+    expect(modelCatalog.find((model) => model.id === 'gpt-5.6-sol')).toMatchObject({
+      provider: 'capy',
+      contextWindow: 1_000_000,
+    });
   });
   it('validates live model availability before a request', async () => {
     let modelRequests = 0;
@@ -638,7 +689,7 @@ describe('platform extensions', () => {
       if (request.url === '/v1/models') {
         modelRequests += 1;
         response.setHeader('content-type', 'application/json');
-        response.end(JSON.stringify({ data: [{ id: 'available' }] }));
+        response.end(JSON.stringify({ data: [{ id: 'available', context_length: 65536 }] }));
       } else response.end(JSON.stringify({ choices: [] }));
     });
     servers.push(server);
@@ -646,7 +697,10 @@ describe('platform extensions', () => {
     const address = server.address();
     const baseURL = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
     const provider = new OpenAICompatibleProvider({ baseURL, model: 'available' });
-    await expect(provider.validateModel()).resolves.toMatchObject({ id: 'available' });
+    await expect(provider.validateModel()).resolves.toMatchObject({
+      id: 'available',
+      contextWindow: 65536,
+    });
     await expect(provider.models()).resolves.toEqual(['available']);
     expect(modelRequests).toBe(1);
     await expect(

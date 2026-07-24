@@ -127,6 +127,21 @@ function addUsage(session, usage, model) {
     (usage.completionTokens * (model?.outputCostPerMillion ?? 0)) / 1_000_000;
   session.usage = current;
 }
+
+export function providerRetryLimit(error) {
+  if (!(error instanceof Error)) return 2;
+  if (error.name === 'AbortError') return 0;
+  if (/timeout/i.test(error.name) || /timed?\s*out/i.test(error.message)) return 1;
+  const explicitStatus =
+    typeof error.status === 'number'
+      ? error.status
+      : Number(error.message.match(/\b([45]\d\d)\b/)?.[1] ?? 0);
+  if (explicitStatus >= 400 && explicitStatus < 500 && ![408, 409, 429].includes(explicitStatus))
+    return 0;
+  if (/^(Invalid|Unknown|Provider baseURL)/.test(error.message)) return 0;
+  return 2;
+}
+
 export class Agent {
   options;
   constructor(options) {
@@ -206,13 +221,16 @@ export class Agent {
           );
           break;
         } catch (e) {
-          if (
-            attempt >= 2 ||
-            (e instanceof Error &&
-              (e.name === 'AbortError' ||
-                /^(4\d\d|Invalid|Unknown|Provider baseURL)/.test(e.message)))
-          )
-            throw e;
+          const retryLimit = providerRetryLimit(e);
+          if (attempt >= retryLimit) throw e;
+          const timeout =
+            e instanceof Error && (/timeout/i.test(e.name) || /timed?\s*out/i.test(e.message));
+          this.options.onEvent?.(
+            'status',
+            timeout
+              ? `Provider timed out; retrying (${attempt + 1}/${retryLimit})…`
+              : `Provider request failed; retrying (${attempt + 1}/${retryLimit})…`,
+          );
           await new Promise((r) => setTimeout(r, 250 * 2 ** attempt));
         }
       }

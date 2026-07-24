@@ -210,6 +210,37 @@ describe('prompt scheduler', () => {
     expect(errors[0]).toContain('/queue retry');
   });
 
+  it('does not requeue permanent provider errors or freeze later queued work', async () => {
+    const backend = new ControlledBackend();
+    const errors: string[] = [];
+    backend.run = async (prompt, _emit, signal) => {
+      backend.runs.push(prompt);
+      if (prompt === 'missing model')
+        throw Object.assign(new Error('NVIDIA model unavailable (404)'), { status: 404 });
+      await new Promise<void>((resolve) => {
+        backend.releases.push(resolve);
+        signal.addEventListener('abort', resolve, { once: true });
+      });
+    };
+    const scheduler = new PromptScheduler({
+      backend,
+      emit: (kind, value) => kind === 'error' && errors.push(String(value)),
+    });
+
+    await scheduler.submit('missing model');
+    await scheduler.submit('later', 'queue');
+    while (backend.runs.length < 2) await tick();
+
+    expect(backend.runs).toEqual(['missing model', 'later']);
+    expect(scheduler.state()).toMatchObject({ phase: 'running', active: 'later', queue: [] });
+    expect(errors).toEqual(['NVIDIA model unavailable (404)']);
+    expect(errors[0]).not.toContain('/queue retry');
+
+    backend.releases.at(-1)!();
+    await scheduler.waitForIdle();
+    expect(scheduler.state()).toMatchObject({ phase: 'idle', queue: [] });
+  });
+
   it('persists a newly created interrupted local session with user context', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kyokao-scheduler-'));
     const store = new LocalStore(join(root, '.kyokao'));
@@ -496,6 +527,7 @@ describe('Capy API and remote backend', () => {
       store,
       projectId: 'project-1',
       model: 'captain',
+      threadDefaults: { buildModel: 'builder' },
       pollMinMs: 1,
       pollMaxMs: 2,
       random: () => 0.5,
@@ -515,10 +547,12 @@ describe('Capy API and remote backend', () => {
       projectId: 'project-1',
       prompt: 'first',
       model: 'captain',
+      buildModel: 'builder',
     });
     expect(fake.requests.find((request) => request.url.endsWith('/message'))?.body).toEqual({
       message: 'second',
       model: 'captain',
+      buildModel: 'builder',
     });
     expect(fake.requests.every((request) => request.authorization === 'Bearer secret-token')).toBe(
       true,

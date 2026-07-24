@@ -1,6 +1,6 @@
 import { createThemeContext, type ThemeContext } from './theme.js';
 import { MarkdownRenderer } from './markdown.js';
-import { graphemes, graphemeWidth, padDisplay, truncateDisplay } from './editor.js';
+import { graphemes, graphemeWidth, truncateDisplay } from './editor.js';
 
 export interface TranscriptEntry {
   kind: 'system' | 'user' | 'assistant' | 'reasoning' | 'tool' | 'error' | 'status';
@@ -124,47 +124,21 @@ function summarizeToolArgs(rawArgs: string): string | undefined {
   }
 }
 
-function userPillLine(
+function userMessageLine(
   text: string,
   width: number,
   context: ThemeContext,
   prefix: '❯ ' | '  ',
 ): string {
-  const source = `${prefix}${text.replace(/\n/g, ' ↵ ')}`;
-  const content = truncateDisplay(source, Math.max(1, width - 1));
-  const padded = padDisplay(content, width);
-  if (context.colorLevel === 0) return padded;
-  const base = context.tuiTheme.background;
-  const border = context.tuiTheme.border;
-  const bg = base
-    ? {
-        ansi16: border.ansi16,
-        ansi256: context.tuiTheme.dark ? 236 : 254,
-        rgb: base.rgb.map((channel, index) =>
-          Math.round(channel * 0.65 + border.rgb[index]! * 0.35),
-        ) as unknown as readonly [number, number, number],
-      }
-    : border;
-  const fg = context.tuiTheme.primary;
-  const level = context.colorLevel;
-  const bgCode =
-    level === 3
-      ? `\x1b[48;2;${bg.rgb.join(';')}m`
-      : level === 2
-        ? `\x1b[48;5;${bg.ansi256}m`
-        : `\x1b[${bg.ansi16 + 10}m`;
-  const fgCode =
-    level === 3
-      ? `\x1b[38;2;${fg.rgb.join(';')}m`
-      : level === 2
-        ? `\x1b[38;5;${fg.ansi256}m`
-        : `\x1b[${fg.ansi16}m`;
-  return `${bgCode}${fgCode}${padded}\x1b[0m`;
+  const content = truncateDisplay(text.replace(/\n/g, ' ↵ '), Math.max(1, width - 2));
+  if (context.colorLevel === 0) return `${prefix}${content}`;
+  const marker = prefix === '❯ ' ? context.tui('inputAccent', prefix) : prefix;
+  return `${marker}${context.tui('user', content)}`;
 }
 
 /**
  * Scrollback blocks:
- * - user: full-width elevated row with a `❯` prefix and indented continuations
+ * - user: clean accent marker with normal-background text
  * - assistant: free-flowing markdown, no left rail
  * - tool: muted diamond bullet
  */
@@ -201,7 +175,7 @@ export function renderTranscript(
 
     if (entry.kind === 'user') {
       for (const [index, part] of entry.text.split('\n').entries()) {
-        lines.push(userPillLine(part || ' ', contentWidth, context, index === 0 ? '❯ ' : '  '));
+        lines.push(userMessageLine(part || ' ', contentWidth, context, index === 0 ? '❯ ' : '  '));
       }
       lines.push('');
       continue;

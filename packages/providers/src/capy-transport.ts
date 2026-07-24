@@ -1,5 +1,3 @@
-
-
 import type {
   CapyAutomation,
   CapyBlockedOn,
@@ -76,13 +74,15 @@ export function parseTask(value: unknown): CapyTask[] {
   const task = object(value);
   const id = string(task.id);
   return id
-    ? [{
-        id,
-        threadIndex: typeof task.threadIndex === 'number' ? task.threadIndex : null,
-        identifier: string(task.identifier, id),
-        title: string(task.title),
-        status: enumValue(task.status, TASK_STATUSES, 'backlog'),
-      }]
+    ? [
+        {
+          id,
+          threadIndex: typeof task.threadIndex === 'number' ? task.threadIndex : null,
+          identifier: string(task.identifier, id),
+          title: string(task.title),
+          status: enumValue(task.status, TASK_STATUSES, 'backlog'),
+        },
+      ]
     : [];
 }
 
@@ -90,15 +90,17 @@ export function parsePullRequest(value: unknown): CapyPullRequest[] {
   const pull = object(value);
   const url = string(pull.url);
   return url
-    ? [{
-        number: typeof pull.number === 'number' ? pull.number : 0,
-        url,
-        repoFullName: string(pull.repoFullName),
-        state: string(pull.state),
-        headRef: string(pull.headRef),
-        baseRef: string(pull.baseRef),
-        draft: pull.draft === true,
-      }]
+    ? [
+        {
+          number: typeof pull.number === 'number' ? pull.number : 0,
+          url,
+          repoFullName: string(pull.repoFullName),
+          state: string(pull.state),
+          headRef: string(pull.headRef),
+          baseRef: string(pull.baseRef),
+          draft: pull.draft === true,
+        },
+      ]
     : [];
 }
 
@@ -113,12 +115,14 @@ function parseParticipant(value: unknown): CapyThreadParticipant[] {
   const participant = object(value);
   const userId = string(participant.userId);
   return userId
-    ? [{
-        userId,
-        userType: string(participant.userType, 'human') as CapyThreadParticipant['userType'],
-        firstParticipatedAt: string(participant.firstParticipatedAt),
-        lastParticipatedAt: string(participant.lastParticipatedAt),
-      }]
+    ? [
+        {
+          userId,
+          userType: string(participant.userType, 'human') as CapyThreadParticipant['userType'],
+          firstParticipatedAt: string(participant.firstParticipatedAt),
+          lastParticipatedAt: string(participant.lastParticipatedAt),
+        },
+      ]
     : [];
 }
 
@@ -126,12 +130,14 @@ function parseSlackThread(value: unknown): CapySlackThread[] {
   const slack = object(value);
   const channelId = string(slack.channelId);
   return channelId
-    ? [{
-        teamId: string(slack.teamId),
-        channelId,
-        threadTs: string(slack.threadTs),
-        url: string(slack.url),
-      }]
+    ? [
+        {
+          teamId: string(slack.teamId),
+          channelId,
+          threadTs: string(slack.threadTs),
+          url: string(slack.url),
+        },
+      ]
     : [];
 }
 
@@ -246,9 +252,10 @@ export function automation(value: unknown): CapyAutomation {
     description: typeof body.description === 'string' ? body.description : null,
     enabled: body.enabled === true,
     triggerType: string(body.triggerType, 'on_demand') as CapyAutomation['triggerType'],
-    webhookConfig: body.webhookConfig && typeof body.webhookConfig === 'object'
-      ? object(body.webhookConfig)
-      : null,
+    webhookConfig:
+      body.webhookConfig && typeof body.webhookConfig === 'object'
+        ? object(body.webhookConfig)
+        : null,
     integrationTriggerConfig: body.integrationTriggerConfig ?? null,
     cron: typeof body.cron === 'string' ? body.cron : null,
     timezone: string(body.timezone, 'UTC'),
@@ -256,9 +263,10 @@ export function automation(value: unknown): CapyAutomation {
     model: typeof body.model === 'string' ? body.model : null,
     buildModel: typeof body.buildModel === 'string' ? body.buildModel : null,
     baseBranch: typeof body.baseBranch === 'string' ? body.baseBranch : null,
-    repoBranches: body.repoBranches && typeof body.repoBranches === 'object'
-      ? (object(body.repoBranches) as Record<string, string>)
-      : null,
+    repoBranches:
+      body.repoBranches && typeof body.repoBranches === 'object'
+        ? (object(body.repoBranches) as Record<string, string>)
+        : null,
     createdByUserId: string(body.createdByUserId),
     agentType: string(body.agentType, 'captain') as CapyAutomation['agentType'],
     visibilityScope: string(body.visibilityScope, 'project') as CapyAutomation['visibilityScope'],
@@ -268,9 +276,8 @@ export function automation(value: unknown): CapyAutomation {
     lastTriggeredAt: typeof body.lastTriggeredAt === 'string' ? body.lastTriggeredAt : null,
     createdAt: string(body.createdAt),
     updatedAt: string(body.updatedAt),
-    mcpOverrides: body.mcpOverrides && typeof body.mcpOverrides === 'object'
-      ? object(body.mcpOverrides)
-      : null,
+    mcpOverrides:
+      body.mcpOverrides && typeof body.mcpOverrides === 'object' ? object(body.mcpOverrides) : null,
     triggers: items(body.triggers).map((trigger) => object(trigger)),
   };
 }

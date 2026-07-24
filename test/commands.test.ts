@@ -55,6 +55,60 @@ describe('slash-command backing logic (0.8.0)', () => {
       expect(close).toHaveBeenCalledOnce();
     });
 
+    it('lists all Capy models with role eligibility and diagnoses both active roles', async () => {
+      const close = vi.fn(async () => {});
+      const models = [
+        {
+          id: 'captain',
+          name: 'Captain',
+          provider: 'OpenAI',
+          captainEligible: true,
+        },
+        {
+          id: 'builder',
+          name: 'Builder',
+          provider: 'Anthropic',
+          captainEligible: false,
+        },
+      ];
+      const runtime = vi.fn(async () => ({
+        config: {
+          ...defaults,
+          provider: 'capy',
+          model: 'captain',
+          providers: {
+            capy: {
+              projectId: 'project-1',
+              model: 'captain',
+              buildModel: 'builder',
+            },
+          },
+          limits: { ...defaults.limits },
+        },
+        root: 'C:\\workspace',
+        provider: { baseURL: 'https://capy.test/v1' },
+        providerOptions: {
+          apiKey: 'configured',
+          model: 'captain',
+        },
+        capy: {
+          models: vi.fn(async () => models),
+          projects: vi.fn(async () => [{ id: 'project-1', name: 'Project One' }]),
+        },
+        tools: { close },
+      }));
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await commandProgram(runtime).parseAsync(['node', 'kyokao', 'models']);
+      expect(log).toHaveBeenCalledWith('captain\tCaptain\tOpenAI\tCaptain + Build');
+      expect(log).toHaveBeenCalledWith('builder\tBuilder\tAnthropic\tBuild');
+
+      log.mockClear();
+      await commandProgram(runtime).parseAsync(['node', 'kyokao', 'doctor']);
+      expect(log).toHaveBeenCalledWith('Captain model: captain (eligible)');
+      expect(log).toHaveBeenCalledWith('Build model: builder');
+    });
+
     it('requires a provider model and refuses incomplete Capy activation', async () => {
       const program = commandProgram(vi.fn());
       vi.spyOn(console, 'log').mockImplementation(() => {});

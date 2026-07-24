@@ -1,6 +1,7 @@
 // @ts-nocheck
 
 import { providerPresets } from '@kyokao/config';
+import { supportsNvidiaReasoningEffort } from '@kyokao/providers';
 import { CODE_THEME_NAMES, TUI_THEME_NAMES } from '@kyokao/themes';
 import type { CommandDefinition } from '@kyokao/ui';
 import { workspaceCommands } from '@kyokao/ui';
@@ -26,8 +27,15 @@ export function buildCommandPalette(
   value: string,
   ctx: TuiContext,
 ): CommandDefinition[] | undefined {
-  const { r, sessionChoices, memoryChoices, providerModels, projectChoices, capyModelChoices } =
-    ctx;
+  const {
+    r,
+    sessionChoices,
+    memoryChoices,
+    providerModels,
+    projectChoices,
+    capyModelChoices,
+    capyThreadChoices,
+  } = ctx;
   const personality = ctx.backend.session()?.personality ?? 'default';
   // These commands act on the current session with no arguments. Only open
   // their saved-session chooser after the user adds a space (usually via Tab).
@@ -124,6 +132,27 @@ export function buildCommandPalette(
     modelNames.add(model);
     models.push({ value: model, label: model, description: r.config.provider });
   }
+  const localThreadIds = new Set(
+    sessionChoices.flatMap((session) =>
+      session.remote?.provider === 'capy' && session.remote.threadId
+        ? [session.remote.threadId]
+        : [],
+    ),
+  );
+  const sessionPaletteChoices = [
+    ...sessionChoices.map((session, i) => ({
+      value: String(i + 1),
+      label: session.task?.trim().slice(0, 36) || session.id.slice(0, 12),
+      description: `${session.checkpoint ?? 'saved'} · ${(session.updatedAt ?? '').slice(0, 16).replace('T', ' ')}`,
+    })),
+    ...capyThreadChoices
+      .filter((thread) => !localThreadIds.has(thread.id))
+      .map((thread) => ({
+        value: `capy:${thread.id}`,
+        label: thread.title?.trim().slice(0, 36) || `Capy thread ${thread.id.slice(0, 12)}`,
+        description: `Capy ${thread.runState} · ${thread.updatedAt.slice(0, 16).replace('T', ' ')}`,
+      })),
+  ];
   const memoryDelete = value.match(/^\/(memory|memories)\s+delete(?:\s+(.*))?$/i);
   if (memoryDelete) {
     const command = memoryDelete[1]!.toLowerCase() as 'memory' | 'memories';
@@ -138,6 +167,30 @@ export function buildCommandPalette(
         label: key,
         description: 'delete saved memory',
         completion: `/${command} delete ${key}`,
+        submit: true,
+      }));
+  }
+  const capyRoleModel = value.match(/^\/settings\s+(captain-model|build-model)(?:\s+(.*))?$/i);
+  if (capyRoleModel) {
+    if (r.config.provider !== 'capy') return [];
+    const role = capyRoleModel[1]!.toLowerCase() as 'captain-model' | 'build-model';
+    const query = (capyRoleModel[2] ?? '').trimStart().toLowerCase();
+    const active = role === 'captain-model' ? r.config.model : r.config.providers.capy?.buildModel;
+    return ctx.capyAvailableModels
+      .filter((model) => role === 'build-model' || model.captainEligible)
+      .filter(
+        (model) =>
+          model.id.toLowerCase().includes(query) || model.name.toLowerCase().includes(query),
+      )
+      .map((model) => ({
+        name: 'settings' as const,
+        group: 'model' as const,
+        syntax: `/settings ${role} ${model.id}`,
+        label: model.name,
+        description: `${model.id === active ? 'active · ' : ''}${model.provider || 'Capy'} · ${
+          role === 'captain-model' ? 'Captain' : 'Build'
+        }`,
+        completion: `/settings ${role} ${model.id}`,
         submit: true,
       }));
   }
@@ -186,11 +239,36 @@ export function buildCommandPalette(
         submit: true,
       }));
   }
+  const settingsReasoningEffort = value.match(/^\/settings\s+reasoning-effort(?:\s+(.*))?$/i);
+  if (settingsReasoningEffort) {
+    if (!supportsNvidiaReasoningEffort(r.providerOptions.baseURL, r.providerOptions.model))
+      return [];
+    const query = (settingsReasoningEffort[1] ?? '').trimStart().toLowerCase();
+    return [
+      { value: 'low', description: 'fastest · least reasoning' },
+      { value: 'medium', description: 'balanced reasoning and speed' },
+      { value: 'high', description: 'slowest · deepest reasoning' },
+    ]
+      .filter((choice) => choice.value.startsWith(query))
+      .map((choice) => ({
+        name: 'settings' as const,
+        group: 'setup' as const,
+        syntax: `/settings reasoning-effort ${choice.value}`,
+        label: themeDisplayName(choice.value),
+        description: `${r.providerOptions.reasoningEffort === choice.value ? 'active · ' : ''}${choice.description}`,
+        completion: `/settings reasoning-effort ${choice.value}`,
+        submit: true,
+      }));
+  }
   const settings = value.match(/^\/settings(?:\s+(.*))?$/i);
   if (settings) {
     const query = (settings[1] ?? '').trimStart().toLowerCase();
     const thinkingTarget = r.config.tui.showThinking ? 'off' : 'on';
     const subagentTarget = r.config.subagents.enabled ? 'off' : 'on';
+    const reasoningSupported = supportsNvidiaReasoningEffort(
+      r.providerOptions.baseURL,
+      r.providerOptions.model,
+    );
     return [
       {
         value: 'thinking',
@@ -199,18 +277,45 @@ export function buildCommandPalette(
         completion: `/settings thinking ${thinkingTarget}`,
         submit: true,
       },
+      ...(reasoningSupported
+        ? [
+            {
+              value: 'reasoning-effort',
+              label: 'Reasoning effort',
+              description: r.providerOptions.reasoningEffort ?? 'medium',
+              completion: '/settings reasoning-effort ',
+            },
+          ]
+        : []),
       {
         value: 'provider',
         label: 'Provider',
         description: r.config.provider,
         completion: '/provider ',
       },
-      {
-        value: 'model',
-        label: 'Model',
-        description: r.config.model,
-        completion: '/model ',
-      },
+      ...(r.config.provider === 'capy'
+        ? [
+            {
+              value: 'captain-model',
+              label: 'Captain model',
+              description: r.config.model,
+              completion: '/settings captain-model ',
+            },
+            {
+              value: 'build-model',
+              label: 'Build model',
+              description: r.config.providers.capy?.buildModel ?? 'not selected',
+              completion: '/settings build-model ',
+            },
+          ]
+        : [
+            {
+              value: 'model',
+              label: 'Model',
+              description: r.config.model,
+              completion: '/model ',
+            },
+          ]),
       {
         value: 'permissions',
         label: 'Permissions',
@@ -345,24 +450,8 @@ export function buildCommandPalette(
       { value: 'clear', description: 'remove all queued prompts' },
       { value: 'retry', description: 'retry after a queue error' },
     ]) ??
-    choicePalette(
-      value,
-      'sessions',
-      sessionChoices.map((session, i) => ({
-        value: String(i + 1),
-        label: session.task?.trim().slice(0, 36) || session.id.slice(0, 12),
-        description: `${session.checkpoint ?? 'saved'} · ${(session.updatedAt ?? '').slice(0, 16).replace('T', ' ')}`,
-      })),
-    ) ??
-    choicePalette(
-      value,
-      'resume',
-      sessionChoices.map((session, i) => ({
-        value: String(i + 1),
-        label: session.task?.trim().slice(0, 36) || session.id.slice(0, 12),
-        description: `${session.checkpoint ?? 'saved'} · ${(session.updatedAt ?? '').slice(0, 16).replace('T', ' ')}`,
-      })),
-    ) ??
+    choicePalette(value, 'sessions', sessionPaletteChoices) ??
+    choicePalette(value, 'resume', sessionPaletteChoices) ??
     choicePalette(value, 'archive', [
       { value: 'list', description: 'list archived sessions' },
       {

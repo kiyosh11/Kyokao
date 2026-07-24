@@ -155,6 +155,13 @@ export function validateConfig(value: unknown): asserts value is Partial<KyokaoC
         throw new Error(`provider ${name}.fallbackModels must be an array of strings`);
       if (key === 'stream' && typeof v !== 'boolean')
         throw new Error(`provider ${name}.stream must be a boolean`);
+      if (key === 'reasoningEffort' && !['low', 'medium', 'high'].includes(v as string))
+        throw new Error(`provider ${name}.reasoningEffort must be low, medium, or high`);
+      if (
+        key === 'timeoutMs' &&
+        (!Number.isInteger(v) || (v as number) < 1 || (v as number) > 600_000)
+      )
+        throw new Error(`provider ${name}.timeoutMs must be an integer between 1 and 600000`);
       if (['speed', 'buildSpeed'].includes(key) && !['fast', 'standard'].includes(v as string))
         throw new Error(`provider ${name}.${key} must be fast or standard`);
       if (key === 'tags' && (!Array.isArray(v) || !v.every((tag) => typeof tag === 'string')))
@@ -185,6 +192,8 @@ export function validateConfig(value: unknown): asserts value is Partial<KyokaoC
           'maxTokens',
           'fallbackModels',
           'stream',
+          'reasoningEffort',
+          'timeoutMs',
           'projectId',
           'speed',
           'buildModel',

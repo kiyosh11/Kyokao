@@ -97,6 +97,8 @@ export type EditorKey =
   | 'escape'
   | 'page-up'
   | 'page-down'
+  | 'scroll-up'
+  | 'scroll-down'
   | 'interrupt';
 
 export type InputEvent =
@@ -235,6 +237,15 @@ export class TerminalInputParser {
           continue;
         }
         if (sequences.some(([sequence]) => sequence.startsWith(this.buffer))) break;
+        const mouse = this.buffer.match(/^\x1b\[<(\d+);\d+;\d+[Mm]/);
+        if (mouse) {
+          this.buffer = this.buffer.slice(mouse[0].length);
+          const button = Number(mouse[1]);
+          if ((button & 64) !== 0)
+            events.push({ type: 'key', key: (button & 1) === 0 ? 'scroll-up' : 'scroll-down' });
+          continue;
+        }
+        if (/^\x1b\[<[0-9;]*$/.test(this.buffer)) break;
         const csi = this.buffer.match(/^\x1b\[[0-9;?]*[~A-Za-z]/)?.[0];
         if (csi) {
           this.buffer = this.buffer.slice(csi.length);

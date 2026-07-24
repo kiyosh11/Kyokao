@@ -30,7 +30,10 @@ async function fakeOpenAIServer() {
 
     response.end(
       event({ choices: [{ delta: { content: 'stubbed answer' }, finish_reason: null }] }) +
-        event({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } }) +
+        event({
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+        }) +
         'data: [DONE]\n\n',
     );
   });

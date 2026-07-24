@@ -61,7 +61,6 @@ class McpClient {
     try {
       await this.handshake(startTimeoutMs);
     } catch (error) {
-
       this.process?.kill();
       throw error;
     }
@@ -157,7 +156,11 @@ class McpClient {
   ): Promise<JsonRpcMessage> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      const entry = { resolve, reject, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+      const entry = {
+        resolve,
+        reject,
+        timer: undefined as ReturnType<typeof setTimeout> | undefined,
+      };
 
       entry.timer = setTimeout(() => {
         if (this.pending.delete(id)) {

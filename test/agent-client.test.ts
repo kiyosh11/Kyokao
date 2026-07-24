@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PassThrough } from 'node:stream';
-import {
-  runAgentClient,
-  type JsonRpcMessage,
-} from '@kyokao/agent';
+import { runAgentClient, type JsonRpcMessage } from '@kyokao/agent';
 import type { PromptBackend, BackendEmit } from '@kyokao/agent';
 import type { Session } from '@kyokao/memory';
 
