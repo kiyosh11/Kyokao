@@ -1,11 +1,38 @@
-# Kyokao
+<div align="center">
+  <h1>kyokao</h1>
+  <p><strong>An open-source coding agent built for the terminal.</strong></p>
+  <p>Work directly in local repositories with OpenAI-compatible models, or hand connected repositories to Capy's remote agents and isolated VMs.</p>
+  <p>
+    <a href="https://www.npmjs.com/package/kyokao"><img alt="npm version" src="https://img.shields.io/npm/v/kyokao?style=flat-square&color=14b8a6"></a>
+    <a href="https://www.npmjs.com/package/kyokao"><img alt="npm downloads" src="https://img.shields.io/npm/dm/kyokao?style=flat-square&color=14b8a6"></a>
+    <a href="https://github.com/kiyosh11/Kyokao/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/kiyosh11/Kyokao/ci.yml?branch=main&style=flat-square&label=CI"></a>
+    <a href="https://github.com/kiyosh11/Kyokao/blob/main/LICENSE"><img alt="ISC license" src="https://img.shields.io/github/license/kiyosh11/Kyokao?style=flat-square"></a>
+    <a href="https://www.npmjs.com/package/kyokao"><img alt="Node.js version" src="https://img.shields.io/node/v/kyokao?style=flat-square"></a>
+  </p>
+  <p>
+    <a href="#requirements-and-installation">Install</a> ·
+    <a href="#quickstart">Quickstart</a> ·
+    <a href="#providers">Providers</a> ·
+    <a href="#architecture">Architecture</a> ·
+    <a href="CONTRIBUTING.md">Contribute</a>
+  </p>
+</div>
 
-Kyokao is a TypeScript coding-agent CLI with two first-class execution modes: a permissioned local tool loop using OpenAI-compatible APIs, and Capy's remote agent API for connected repositories and isolated VMs.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kiyosh11/Kyokao/main/docs/screenshots/kyokao-capy-workspace.png" alt="Kyokao terminal workspace running a Capy remote agent" width="1101">
+</p>
 
-It is a local command-line application with a full-screen terminal interface. Review generated changes before keeping or committing them.
+## Why Kyokao
+
+| Local when you want control                                                                           | Remote when you want delegation                                                                                                    | A TUI that stays out of the way                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Run a permissioned tool loop against the repository on your machine with OpenAI-compatible providers. | Select a Capy project, Captain model, and Build model; resume remote threads and inspect tasks, diffs, tags, usage, and PR status. | Stream responses, edit while work runs, queue follow-ups, switch named themes, inspect context, and navigate transcripts without leaving the terminal. |
+
+Kyokao is developed in the open under the [ISC License](LICENSE). Bugs and feature requests belong in [GitHub Issues](https://github.com/kiyosh11/Kyokao/issues), and pull requests are welcome through the short [contribution guide](CONTRIBUTING.md).
 
 ## Contents
 
+- [Why Kyokao](#why-kyokao)
 - [Features](#features)
 - [Requirements and installation](#requirements-and-installation)
 - [Quickstart](#quickstart)
@@ -41,6 +68,15 @@ It is a local command-line application with a full-screen terminal interface. Re
 ## Requirements and installation
 
 Kyokao requires **Node.js 20 or later** and **Git**. Building from source uses the repository-pinned package manager, **pnpm 10.31.0**. A global installed package only needs Node.js 20 or later at runtime.
+
+### Install from npm
+
+```bash
+npm install --global kyokao
+kyokao
+```
+
+Use `npm install --global kyokao@latest` to update an existing global installation. The first launch opens the provider setup flow; API keys can stay in environment variables instead of being written to project files.
 
 ### Build and run from source
 
