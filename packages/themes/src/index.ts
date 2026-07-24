@@ -1,4 +1,4 @@
-export type ColorLevel = 0 | 1 | 2 | 3;
+﻿export type ColorLevel = 0 | 1 | 2 | 3;
 export type ColorModifier = 'bold' | 'dim' | 'italic' | 'underline';
 
 export interface ColorToken {
@@ -59,6 +59,7 @@ const palettes = {
   yellow: token(93, 228, [241, 250, 140]),
   red: token(91, 203, [255, 85, 85]),
   magenta: token(95, 212, [255, 121, 198]),
+  accentMagenta: token(95, 177, [199, 125, 255]),
   white: token(97, 255, [248, 248, 242]),
   gray: token(90, 102, [98, 114, 164]),
   black: token(30, 234, [40, 42, 54]),
@@ -92,25 +93,25 @@ function code(name: string, dark: boolean, colors: Omit<CodeTheme, 'name' | 'dar
 }
 
 const darkBase = {
-  border: token(90, 60, [74, 84, 102]),
-  primary: palettes.white,
-  muted: token(90, 102, [125, 133, 144], 'dim'),
-  status: palettes.blue,
-  warning: palettes.yellow,
-  error: palettes.red,
-  inputAccent: palettes.cyan,
-  cursorAccent: palettes.cyan,
+  border: token(90, 60, [72, 76, 88]),
+  primary: token(97, 255, [232, 230, 227]),
+  muted: token(90, 102, [138, 142, 152], 'dim'),
+  status: token(94, 111, [130, 170, 255]),
+  warning: token(93, 221, [232, 196, 104]),
+  error: token(91, 203, [255, 107, 122]),
+  inputAccent: palettes.accentMagenta,
+  cursorAccent: palettes.accentMagenta,
 };
 
 const lightBase = {
-  border: token(90, 245, [120, 120, 120]),
-  primary: token(30, 235, [36, 41, 46]),
-  muted: token(90, 242, [87, 96, 106]),
-  status: token(34, 28, [9, 105, 74]),
+  border: token(90, 245, [140, 140, 148]),
+  primary: token(30, 235, [28, 28, 34]),
+  muted: token(90, 242, [96, 100, 112]),
+  status: token(35, 98, [124, 58, 237]),
   warning: token(33, 136, [154, 103, 0]),
   error: token(31, 160, [207, 34, 46]),
-  inputAccent: token(34, 28, [9, 105, 74]),
-  cursorAccent: token(34, 28, [9, 105, 74]),
+  inputAccent: token(35, 98, [124, 58, 237]),
+  cursorAccent: token(35, 98, [124, 58, 237]),
 };
 
 export const TUI_THEME_NAMES = [
@@ -138,20 +139,29 @@ export type CodeThemeName = (typeof CODE_THEME_NAMES)[number];
 
 export const tuiThemes: Readonly<Record<TuiThemeName, TuiTheme>> = Object.freeze({
   'kyokao-dark': tui('kyokao-dark', true, {
-    ...darkBase,
-    brand: token(96, 45, [41, 208, 208], 'bold'),
-    user: palettes.cyan,
-    assistant: palettes.green,
-    tool: palettes.yellow,
-    selected: token(96, 45, [41, 208, 208], 'bold'),
+    brand: token(95, 141, [187, 154, 247], 'bold'),
+    border: token(90, 239, [80, 80, 88]),
+    primary: token(97, 254, [225, 225, 225]),
+    muted: token(90, 242, [108, 108, 108]),
+    user: token(97, 251, [200, 200, 200]),
+    assistant: token(97, 254, [225, 225, 225]),
+    tool: token(90, 243, [120, 120, 120]),
+    status: token(97, 251, [200, 200, 200]),
+    warning: token(93, 179, [224, 175, 104]),
+    error: token(91, 210, [247, 118, 142]),
+    selected: token(95, 141, [187, 154, 247], 'bold'),
+    inputAccent: token(97, 251, [200, 200, 200]),
+    cursorAccent: token(97, 251, [200, 200, 200]),
+    background: token(30, 234, [20, 20, 20]),
   }),
   'kyokao-light': tui('kyokao-light', false, {
     ...lightBase,
-    brand: token(36, 30, [0, 119, 128], 'bold'),
-    user: token(34, 28, [9, 105, 74]),
-    assistant: token(34, 22, [17, 99, 41]),
-    tool: token(35, 90, [130, 80, 0]),
-    selected: token(36, 30, [0, 119, 128], 'bold'),
+    brand: token(35, 98, [124, 58, 237], 'bold'),
+    user: token(35, 98, [124, 58, 237]),
+    assistant: token(30, 235, [40, 40, 48]),
+    tool: token(35, 97, [112, 72, 180]),
+    selected: token(35, 98, [124, 58, 237], 'bold'),
+    background: token(97, 255, [250, 249, 247]),
   }),
   dracula: tui('dracula', true, {
     ...darkBase,
@@ -225,19 +235,19 @@ export const tuiThemes: Readonly<Record<TuiThemeName, TuiTheme>> = Object.freeze
 });
 
 const kyokaoCode = {
-  plain: palettes.white,
-  keyword: palettes.magenta,
-  string: palettes.cyan,
-  number: palettes.yellow,
-  booleanNull: palettes.magenta,
-  comment: token(90, 102, [98, 114, 164], 'italic'),
-  functionType: palettes.green,
-  property: palettes.blue,
-  punctuation: token(97, 252, [220, 220, 220]),
-  diffAdd: palettes.green,
-  diffRemove: palettes.red,
-  diffContext: token(90, 102, [125, 133, 144]),
-  fenceLabel: token(96, 45, [41, 208, 208], 'bold'),
+  plain: token(97, 255, [232, 230, 227]),
+  keyword: palettes.accentMagenta,
+  string: token(92, 114, [156, 220, 180]),
+  number: token(93, 221, [232, 196, 104]),
+  booleanNull: palettes.accentMagenta,
+  comment: token(90, 102, [120, 124, 136], 'italic'),
+  functionType: token(94, 111, [130, 170, 255]),
+  property: token(96, 117, [148, 196, 220]),
+  punctuation: token(97, 250, [200, 198, 194]),
+  diffAdd: token(92, 114, [120, 200, 150]),
+  diffRemove: token(91, 203, [255, 107, 122]),
+  diffContext: token(90, 102, [138, 142, 152]),
+  fenceLabel: token(95, 177, [199, 125, 255], 'bold'),
 };
 
 export const codeThemes: Readonly<Record<CodeThemeName, CodeTheme>> = Object.freeze({
@@ -352,6 +362,7 @@ export function detectColorLevel(
   if (options.isTTY === false || env.TERM === 'dumb') return 0;
   if (!options.isTTY) return 0;
   if (/truecolor|24bit/i.test(env.COLORTERM ?? '')) return 3;
+  if (env.WT_SESSION) return 3;
   if (/256color/i.test(env.TERM ?? '')) return 2;
   return 1;
 }
@@ -371,13 +382,26 @@ export function paintToken(
 ): string {
   if (!value || level === 0) return value;
   const prefix = (token.modifiers ?? []).map((item) => `\x1b[${modifierCodes[item]}m`).join('');
-  const color =
-    level === 3
-      ? `\x1b[${background ? 48 : 38};2;${token.rgb.join(';')}m`
-      : level === 2
-        ? `\x1b[${background ? 48 : 38};5;${token.ansi256}m`
-        : `\x1b[${background ? token.ansi16 + 10 : token.ansi16}m`;
+  const color = tokenColor(token, level, background);
   return `${prefix}${color}${value}\x1b[0m`;
+}
+
+function tokenColor(token: ColorToken, level: ColorLevel, background: boolean): string {
+  return level === 3
+    ? `\x1b[${background ? 48 : 38};2;${token.rgb.join(';')}m`
+    : level === 2
+      ? `\x1b[${background ? 48 : 38};5;${token.ansi256}m`
+      : `\x1b[${background ? token.ansi16 + 10 : token.ansi16}m`;
+}
+
+export function paintBackground(value: string, token: ColorToken, level: ColorLevel): string {
+  if (!value || level === 0) return value;
+  const color = backgroundEscape(token, level);
+  return `${color}${value.replaceAll('\x1b[0m', `\x1b[0m${color}`)}\x1b[0m`;
+}
+
+export function backgroundEscape(token: ColorToken, level: ColorLevel): string {
+  return level === 0 ? '' : tokenColor(token, level, true);
 }
 
 export function suggestName(value: string, names: readonly string[]): string[] {

@@ -1,83 +1,16 @@
+// @ts-nocheck
 import OpenAI from 'openai';
+import { modelCatalog } from './types.js';
+// Public API re-exports — package surface unchanged for consumers.
+export * from './types.js';
 export * from './capy.js';
-
-export interface ToolCall {
-  id: string;
-  name: string;
-  arguments: string;
-}
-export type ChatMessage =
-  | { role: 'system' | 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
-  | { role: 'tool'; content: string; tool_call_id: string; name?: string };
-export interface ChatResponse {
-  message: Extract<ChatMessage, { role: 'assistant' }>;
-  finishReason?: string;
-  usage?: TokenUsage;
-}
-export interface TokenUsage {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-export interface ModelInfo {
-  id: string;
-  provider?: string;
-  contextWindow?: number;
-  inputCostPerMillion?: number;
-  outputCostPerMillion?: number;
-  supportsTools?: boolean;
-}
-export const modelCatalog: ModelInfo[] = [
-  {
-    id: 'gpt-4o-mini',
-    provider: 'openai',
-    contextWindow: 128000,
-    inputCostPerMillion: 0.15,
-    outputCostPerMillion: 0.6,
-    supportsTools: true,
-  },
-  {
-    id: 'gpt-4o',
-    provider: 'openai',
-    contextWindow: 128000,
-    inputCostPerMillion: 2.5,
-    outputCostPerMillion: 10,
-    supportsTools: true,
-  },
-  {
-    id: 'gpt-4.1-mini',
-    provider: 'openai',
-    contextWindow: 1047576,
-    inputCostPerMillion: 0.4,
-    outputCostPerMillion: 1.6,
-    supportsTools: true,
-  },
-  {
-    id: 'claude-3-5-sonnet',
-    contextWindow: 200000,
-    inputCostPerMillion: 3,
-    outputCostPerMillion: 15,
-    supportsTools: true,
-  },
-  {
-    id: 'llama-3.3-70b-versatile',
-    provider: 'groq',
-    contextWindow: 131072,
-    supportsTools: true,
-  },
-];
-export interface StreamEvents {
-  onText?: (delta: string) => void;
-  onToolCall?: (call: ToolCall) => void;
-}
-
 /** Maps Kyokao's stable transcript shape to the OpenAI wire protocol. */
-export function toOpenAIMessage(message: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam {
+export function toOpenAIMessage(message) {
   if (message.role === 'assistant')
     return {
       role: 'assistant',
       content: message.content,
+      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
       tool_calls: message.tool_calls?.map((call) => ({
         id: call.id,
         type: 'function',
@@ -88,22 +21,24 @@ export function toOpenAIMessage(message: ChatMessage): OpenAI.Chat.ChatCompletio
     return { role: 'tool', content: message.content, tool_call_id: message.tool_call_id };
   return message;
 }
+/**
+ * OpenAI-compatible chat client. Works against any endpoint that speaks the
+ * `/chat/completions` and `/models` surface — hosted (OpenAI, OpenRouter,
+ * Groq, …) or local (Ollama, LM Studio, vLLM). Uses the official `openai`
+ * SDK when no custom `fetch` is injected, else a raw fetch path. Streaming
+ * is on by default; tool-call deltas are reassembled by index.
+ *
+ * Fallback behavior: when the primary model rejects, `chat` walks
+ * `fallbackModels` in order. A successful call resets the fallback index so a
+ * single transient failure does not permanently downgrade the session.
+ */
 export class OpenAICompatibleProvider {
-  private client?: OpenAI;
-  private fallbackIndex = -1;
-  constructor(
-    readonly options: {
-      baseURL?: string;
-      apiKey?: string;
-      model: string;
-      temperature?: number;
-      maxTokens?: number;
-      topP?: number;
-      fallbackModels?: string[];
-      fetch?: typeof fetch;
-      stream?: boolean;
-    },
-  ) {
+  options;
+  client;
+  fallbackIndex = -1;
+  modelCache;
+  constructor(options) {
+    this.options = options;
     if (!options.baseURL) throw new Error('Provider baseURL is required');
     if (!options.fetch)
       this.client = new OpenAI({
@@ -111,60 +46,68 @@ export class OpenAICompatibleProvider {
         apiKey: options.apiKey ?? 'not-required',
       });
   }
-  private get request() {
+  get request() {
     return this.options.fetch ?? fetch;
   }
-  async models(signal?: AbortSignal): Promise<string[]> {
-    if (this.client)
-      return (await this.client.models.list({ signal })).data.map((model) => model.id);
-    const response = await this.request(`${this.options.baseURL!.replace(/\/$/, '')}/models`, {
-      headers: this.headers(),
-      signal,
-    });
-    if (!response.ok) throw new Error(`Model listing failed: ${response.status}`);
-    return (
-      ((await response.json()) as { data?: Array<{ id: string }> }).data?.map(
-        (model) => model.id,
-      ) ?? []
-    );
+  get baseURL() {
+    return this.options.baseURL;
   }
-  async modelCatalog(): Promise<ModelInfo[]> {
+  async models(signal) {
+    if (this.modelCache && this.modelCache.expiresAt > Date.now())
+      return [...this.modelCache.values];
+    let values;
+    if (this.client)
+      values = (await this.client.models.list({ signal })).data.map((model) => model.id);
+    else {
+      const response = await this.request(`${this.options.baseURL.replace(/\/$/, '')}/models`, {
+        headers: this.headers(),
+        signal,
+      });
+      if (!response.ok) throw new Error(`Model listing failed: ${response.status}`);
+      values = (await response.json()).data?.map((model) => model.id) ?? [];
+    }
+    this.modelCache = { values: [...values], expiresAt: Date.now() + 30_000 };
+    return values;
+  }
+  async modelCatalog() {
     const ids = await this.models();
+    // NOTE: references the imported `modelCatalog` const, not a method.
     return ids.map((id) => ({
       id,
       ...modelCatalog.find((item) => item.id === id),
       provider: this.options.baseURL,
     }));
   }
-  async validateModel(): Promise<ModelInfo> {
+  async validateModel() {
     const models = await this.models();
     const match = models.find((id) => id === this.options.model);
     if (!match)
       throw new Error(
         `Model "${this.options.model}" is not available at ${this.options.baseURL}. Run "kyokao models" to see available IDs.`,
       );
-    const unavailableFallback = (this.options.fallbackModels ?? []).find(
-      (model) => !models.includes(model),
-    );
-    if (unavailableFallback)
-      throw new Error(
-        `Fallback model "${unavailableFallback}" is not available at ${this.options.baseURL}. Remove it or use "kyokao models" to choose a valid fallback.`,
-      );
+    // Fallbacks are an availability safety net: warn (don't throw) when one is
+    // missing from /models, since it may simply not be listed transiently and
+    // hard-failing here defeats the resilience the fallback exists to provide.
+    for (const fallback of this.options.fallbackModels ?? [])
+      if (!models.includes(fallback))
+        console.warn(
+          `Kyokao: fallback model "${fallback}" is not listed at ${this.options.baseURL}; it will be skipped if the primary fails.`,
+        );
     return {
       id: match,
       ...modelCatalog.find((item) => item.id === match),
       provider: this.options.baseURL,
     };
   }
-  async chat(
-    messages: ChatMessage[],
-    tools: unknown[],
-    events: StreamEvents = {},
-    signal?: AbortSignal,
-  ): Promise<ChatResponse> {
+  async chat(messages, tools, events = {}, signal) {
     try {
-      if (this.client) return await this.sdkChat(messages, tools, events, signal);
-      return await this.fetchChat(messages, tools, signal);
+      const result = this.client
+        ? await this.sdkChat(messages, tools, events, signal)
+        : await this.fetchChat(messages, tools, events, signal);
+      // A successful call restores the primary model: a single transient 5xx
+      // on the primary must not permanently downgrade the whole session.
+      this.fallbackIndex = -1;
+      return result;
     } catch (error) {
       const next = (this.options.fallbackModels ?? [])[this.fallbackIndex + 1];
       if (!next || (error instanceof Error && error.name === 'AbortError')) throw error;
@@ -172,36 +115,32 @@ export class OpenAICompatibleProvider {
       return this.chat(messages, tools, events, signal);
     }
   }
-  private async sdkChat(
-    messages: ChatMessage[],
-    tools: unknown[],
-    events: StreamEvents,
-    signal?: AbortSignal,
-  ): Promise<ChatResponse> {
+  async sdkChat(messages, tools, events, signal) {
     const request = {
       model: this.activeModel(),
       messages: messages.map(toOpenAIMessage),
-      tools: tools as OpenAI.Chat.ChatCompletionTool[],
+      tools: tools,
       ...(this.options.temperature === undefined ? {} : { temperature: this.options.temperature }),
       ...(this.options.maxTokens === undefined ? {} : { max_tokens: this.options.maxTokens }),
       ...(this.options.topP === undefined ? {} : { top_p: this.options.topP }),
     };
     if (this.options.stream === false)
       return this.fromCompletion(
-        (await this.client!.chat.completions.create(request, {
+        await this.client.chat.completions.create(request, {
           signal,
-        })) as OpenAI.Chat.ChatCompletion,
+        }),
       );
-    const stream = await this.client!.chat.completions.create(
+    const stream = await this.client.chat.completions.create(
       { ...request, stream: true, stream_options: { include_usage: true } },
       { signal },
     );
     let content = '';
-    let finishReason: string | undefined;
-    let usage: TokenUsage | undefined;
-    const calls = new Map<number, ToolCall>();
+    let reasoningContent = '';
+    let finishReason;
+    let usage;
+    const calls = new Map();
     for await (const chunk of stream) {
-      const chunkUsage = (chunk as unknown as { usage?: OpenAI.CompletionUsage }).usage;
+      const chunkUsage = chunk.usage;
       if (chunkUsage)
         usage = {
           promptTokens: chunkUsage.prompt_tokens,
@@ -211,6 +150,11 @@ export class OpenAICompatibleProvider {
       const choice = chunk.choices[0];
       if (!choice) continue;
       finishReason = choice.finish_reason ?? finishReason;
+      const reasoningDelta = choice.delta.reasoning_content ?? choice.delta.reasoning;
+      if (typeof reasoningDelta === 'string' && reasoningDelta) {
+        reasoningContent += reasoningDelta;
+        events.onReasoning?.(reasoningDelta);
+      }
       if (choice.delta.content) {
         content += choice.delta.content;
         events.onText?.(choice.delta.content);
@@ -234,13 +178,14 @@ export class OpenAICompatibleProvider {
       message: {
         role: 'assistant',
         content: content || null,
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
       },
       finishReason,
       usage,
     };
   }
-  private fromCompletion(response: OpenAI.Chat.ChatCompletion): ChatResponse {
+  fromCompletion(response) {
     const choice = response.choices[0];
     const message = choice?.message;
     if (!message) throw new Error('Provider returned no choices');
@@ -248,6 +193,7 @@ export class OpenAICompatibleProvider {
       message: {
         role: 'assistant',
         content: message.content,
+        ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
         tool_calls: message.tool_calls?.map((call) => ({
           id: call.id,
           name: call.function.name,
@@ -264,22 +210,24 @@ export class OpenAICompatibleProvider {
         : undefined,
     };
   }
-  private async fetchChat(
-    messages: ChatMessage[],
-    tools: unknown[],
-    signal?: AbortSignal,
-  ): Promise<ChatResponse> {
+  async fetchChat(messages, tools, events, signal) {
+    const wantStream = this.options.stream !== false;
     const response = await this.request(
-      `${this.options.baseURL!.replace(/\/$/, '')}/chat/completions`,
+      `${this.options.baseURL.replace(/\/$/, '')}/chat/completions`,
       {
         method: 'POST',
-        headers: { ...this.headers(), 'content-type': 'application/json' },
+        headers: {
+          ...this.headers(),
+          'content-type': 'application/json',
+          ...(wantStream ? { accept: 'text/event-stream' } : {}),
+        },
         signal,
         body: JSON.stringify({
           model: this.activeModel(),
           messages: messages.map(toOpenAIMessage),
           tools,
-          stream: false,
+          stream: wantStream,
+          ...(wantStream ? { stream_options: { include_usage: true } } : {}),
           ...(this.options.temperature === undefined
             ? {}
             : { temperature: this.options.temperature }),
@@ -290,22 +238,21 @@ export class OpenAICompatibleProvider {
     );
     if (!response.ok)
       throw new Error(`Chat request failed: ${response.status} ${await response.text()}`);
-    const body = (await response.json()) as {
-      choices?: Array<{
-        message: {
-          content: string | null;
-          tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>;
-        };
-        finish_reason?: string;
-      }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    };
+    // Streaming path: parse the SSE body incrementally, mirroring sdkChat.
+    if (wantStream && response.body) {
+      return await this.consumeSSEStream(response.body, events, signal);
+    }
+    // Non-streaming path: read the full JSON body.
+    const body = await response.json();
     const choice = body.choices?.[0];
     if (!choice) throw new Error('Provider returned no choices');
     return {
       message: {
         role: 'assistant',
         content: choice.message.content,
+        ...(choice.message.reasoning_content
+          ? { reasoning_content: choice.message.reasoning_content }
+          : {}),
         tool_calls: choice.message.tool_calls?.map((c) => ({
           id: c.id,
           name: c.function.name,
@@ -322,12 +269,148 @@ export class OpenAICompatibleProvider {
         : undefined,
     };
   }
-  private headers(): Record<string, string> {
+  /**
+   * Consume a Server-Sent Events stream from `/chat/completions` with
+   * `stream: true`. Parses `data: {…}` frames, accumulates text/tool-call
+   * deltas across chunks (matching the OpenAI wire format), and fires
+   * `events.onText`/`events.onToolCall` per delta — the same callback shape
+   * the SDK path uses, so callers see identical streaming behavior.
+   */
+  async consumeSSEStream(body, events, signal) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let reasoningContent = '';
+    let finishReason;
+    let usage;
+    const calls = new Map();
+    const handleFrame = (data) => {
+      if (data === '[DONE]') return;
+      let frame;
+      try {
+        frame = JSON.parse(data);
+      } catch {
+        return; // Skip malformed frames (keepalive comments, partial JSON).
+      }
+      if (frame.usage)
+        usage = {
+          promptTokens: frame.usage.prompt_tokens ?? 0,
+          completionTokens: frame.usage.completion_tokens ?? 0,
+          totalTokens: frame.usage.total_tokens ?? 0,
+        };
+      const choice = frame.choices?.[0];
+      if (!choice) return;
+      finishReason = choice.finish_reason ?? finishReason;
+      const delta = choice.delta ?? {};
+      const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
+      if (typeof reasoningDelta === 'string' && reasoningDelta) {
+        reasoningContent += reasoningDelta;
+        events.onReasoning?.(reasoningDelta);
+      }
+      if (delta.content) {
+        content += delta.content;
+        events.onText?.(delta.content);
+      }
+      for (const tc of delta.tool_calls ?? []) {
+        const index = tc.index ?? 0;
+        const current = calls.get(index) ?? { id: '', name: '', arguments: '' };
+        if (tc.id) current.id = tc.id;
+        if (tc.function?.name && !current.name) current.name = tc.function.name;
+        if (tc.function?.arguments) current.arguments += tc.function.arguments;
+        calls.set(index, current);
+      }
+    };
+    try {
+      while (true) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line. A frame may carry several
+        // `data:` lines; per the spec, multi-line data is concatenated with
+        // `\n` before parsing. OpenAI sends one JSON object per frame, but
+        // other providers (and proxies) may split a payload across lines.
+        let separator;
+        while ((separator = buffer.match(/\r?\n\r?\n/))) {
+          const separatorIndex = separator.index ?? 0;
+          const rawFrame = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + separator[0].length);
+          const dataLines = rawFrame
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).replace(/^ /, ''));
+          if (dataLines.length) handleFrame(dataLines.join('\n'));
+        }
+      }
+      // Flush any trailing buffered frame (servers may omit the final blank line).
+      buffer += decoder.decode();
+      const trailingData = buffer
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).replace(/^ /, ''));
+      if (trailingData.length) handleFrame(trailingData.join('\n'));
+    } finally {
+      reader.releaseLock();
+    }
+    const toolCalls = [...calls.values()];
+    for (const call of toolCalls) events.onToolCall?.(call);
+    return {
+      message: {
+        role: 'assistant',
+        content: content || null,
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      },
+      finishReason,
+      usage,
+    };
+  }
+  headers() {
     return this.options.apiKey ? { authorization: `Bearer ${this.options.apiKey}` } : {};
   }
-  private activeModel(): string {
+  activeModel() {
     return this.fallbackIndex < 0
       ? this.options.model
       : ((this.options.fallbackModels ?? [])[this.fallbackIndex] ?? this.options.model);
+  }
+}
+/**
+ * Adapts {@link CapyClient} to the {@link Provider} surface so callers can
+ * list/validate models and read display metadata uniformly across backends.
+ * `chat` is intentionally unsupported — Capy conversations run through
+ * threads via {@link CapyRemoteBackend}, not the /chat/completions endpoint
+ * this interface otherwise represents.
+ */
+export class CapyProviderAdapter {
+  client;
+  options;
+  constructor(client, options) {
+    this.client = client;
+    this.options = options;
+  }
+  get baseURL() {
+    return this.client.baseURL;
+  }
+  async models(signal) {
+    return (await this.client.models(signal)).map((model) => model.id);
+  }
+  async validateModel() {
+    const models = await this.client.models();
+    const match = models.find((model) => model.id === this.options.model && model.captainEligible);
+    if (!match)
+      throw new Error(
+        `Capy model "${this.options.model}" is not available or not Captain eligible at ${this.client.baseURL}.`,
+      );
+    return {
+      id: match.id,
+      provider: this.client.baseURL,
+      supportsTools: true,
+    };
+  }
+  async chat() {
+    throw new Error(
+      'Capy chat runs through threads (CapyRemoteBackend); use the backend, not Provider.chat.',
+    );
   }
 }

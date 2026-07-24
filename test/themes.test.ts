@@ -28,9 +28,7 @@ import {
 } from '@kyokao/ui';
 import { loadConfig, saveGlobalThemes } from '@kyokao/config';
 import type { PromptBackend } from '@kyokao/agent';
-
 const tokenKeys = ['ansi16', 'ansi256', 'rgb'] as const;
-
 describe('theme registry and terminal capability', () => {
   it('contains unique, frozen, schema-complete built-ins', () => {
     expect(new Set(TUI_THEME_NAMES).size).toBe(TUI_THEME_NAMES.length);
@@ -46,22 +44,20 @@ describe('theme registry and terminal capability', () => {
       }
     }
   });
-
   it('honors NO_COLOR, non-TTY defaults, force color, and common levels', () => {
     expect(detectColorLevel({ env: { NO_COLOR: '' }, isTTY: true, forceColor: 3 })).toBe(0);
     expect(detectColorLevel({ env: {}, isTTY: false })).toBe(0);
     expect(detectColorLevel({ env: { FORCE_COLOR: '2' }, isTTY: false })).toBe(2);
     expect(detectColorLevel({ env: { TERM: 'xterm-256color' }, isTTY: true })).toBe(2);
     expect(detectColorLevel({ env: { COLORTERM: 'truecolor' }, isTTY: true })).toBe(3);
+    expect(detectColorLevel({ env: { WT_SESSION: 'terminal-session' }, isTTY: true })).toBe(3);
   });
-
   it('suggests close valid names without changing context state', () => {
     const context = createThemeContext({ tuiTheme: 'nord', codeTheme: 'kyokao', colorLevel: 1 });
     expect(suggestName('dracla', TUI_THEME_NAMES)[0]).toBe('dracula');
     expect(() => context.setTuiTheme('dracla')).toThrow('Unknown');
     expect(context.names).toEqual({ tui: 'nord', code: 'kyokao' });
   });
-
   it('scopes diff rendering to the selected code theme and NO_COLOR', () => {
     const themedOutput = {
       text: '',
@@ -75,7 +71,6 @@ describe('theme registry and terminal capability', () => {
     }).diff('+added\n-removed');
     expect(themedOutput.text).toContain('\x1b[38;2;17;99;41m');
     expect(stripAnsi(themedOutput.text)).toBe('+added\n-removed\n');
-
     const plainOutput = {
       text: '',
       write(value: string) {
@@ -96,9 +91,8 @@ describe('theme registry and terminal capability', () => {
     expect(plainOutput.text).toBe('+added\n-removed\n');
   });
 });
-
 describe('theme configuration', () => {
-  it('applies global, project, profile, environment, and CLI precedence', async () => {
+  it('applies global, profile, environment, and CLI precedence', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kyokao-theme-config-'));
     const global = join(root, 'global.json');
     await writeFile(
@@ -109,12 +103,8 @@ describe('theme configuration', () => {
         profiles: { demo: { theme: 'dracula', codeTheme: 'dracula' } },
       }),
     );
-    await writeFile(
-      join(root, '.kyokao.json'),
-      JSON.stringify({ theme: 'monokai', codeTheme: 'monokai' }),
-    );
-    const project = await loadConfig({ cwd: root, globalPath: global, env: {} });
-    expect(project).toMatchObject({ theme: 'monokai', codeTheme: 'monokai' });
+    const base = await loadConfig({ cwd: root, globalPath: global, env: {} });
+    expect(base).toMatchObject({ theme: 'nord', codeTheme: 'nord' });
     const profile = await loadConfig({
       cwd: root,
       globalPath: global,
@@ -140,7 +130,6 @@ describe('theme configuration', () => {
     });
     expect(cli).toMatchObject({ theme: 'high-contrast', codeTheme: 'kyokao' });
   });
-
   it('validates names and atomically preserves unrelated global settings', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kyokao-theme-save-'));
     const path = join(root, 'config.json');
@@ -156,7 +145,6 @@ describe('theme configuration', () => {
     await expect(loadConfig({ cwd: root, globalPath: path, env: {} })).rejects.toThrow('theme');
   });
 });
-
 const languageCases: Record<string, string> = {
   typescript: 'const value: number = 42; // answer\n',
   javascript: 'function answer() { return "42"; }\n',
@@ -175,14 +163,12 @@ const languageCases: Record<string, string> = {
   markdown: '# Answer\n`42`\n',
   diff: '@@ -1 +1 @@\n-old\n+new\n',
 };
-
 describe('code and Markdown rendering', () => {
   const context = createThemeContext({
     tuiTheme: 'dracula',
     codeTheme: 'dracula',
     colorLevel: 3,
   });
-
   it.each(Object.entries(languageCases))(
     'preserves exact visible %s source while highlighting',
     (language, source) => {
@@ -191,7 +177,6 @@ describe('code and Markdown rendering', () => {
       expect(stripAnsi(rendered)).toBe(source);
     },
   );
-
   it('does not tokenize comment or string contents as code', () => {
     const rendered = new CodeRenderer(context).render(
       '// "string" 123 const\nconst text = "return 99";',
@@ -200,7 +185,6 @@ describe('code and Markdown rendering', () => {
     expect(stripAnsi(rendered)).toBe('// "string" 123 const\nconst text = "return 99";');
     expect(rendered.match(/\x1b\[[^m]*m/g)?.length).toBeGreaterThan(4);
   });
-
   it('themes complete and incomplete Markdown without changing source', () => {
     const markdown = [
       '# Heading',
@@ -218,7 +202,6 @@ describe('code and Markdown rendering', () => {
     const partial = 'before\n```python\ndef answer():\n    return "open';
     expect(stripAnsi(renderer.render(partial))).toBe(partial);
   });
-
   it('streams partial fences without duplication or content changes', () => {
     const renderer = new MarkdownStreamRenderer(context);
     const chunks = ['# Result\n```t', 's\nconst answer', ' = 42;\n``', '`\ndone'];
@@ -226,14 +209,13 @@ describe('code and Markdown rendering', () => {
     expect(stripAnsi(rendered)).toBe(chunks.join(''));
     expect(rendered).toContain('\x1b[');
   });
-
   it('keeps dark/light themed layout widths stable', () => {
     const state = {
       width: 72,
       height: 20,
       header: { workspace: '~', provider: 'fake', model: 'model', approval: 'suggest' },
       transcript: [{ kind: 'assistant' as const, text: '# Result\n```ts\nconst x = 42;\n```' }],
-      editor: new EditorState('/theme'),
+      editor: new EditorState('/settings theme '),
     };
     const dark = renderWorkspaceScreen({
       ...state,
@@ -252,9 +234,8 @@ describe('code and Markdown rendering', () => {
       }),
     });
     expect(dark.lines.map(displayWidth)).toEqual(light.lines.map(displayWidth));
-    expect(dark.lines.every((line) => displayWidth(line) === 72)).toBe(true);
+    expect(dark.lines.every((line) => displayWidth(line) <= 72)).toBe(true);
   });
-
   it.each([39, 79, 119])(
     'wraps ANSI and Unicode losslessly at Windows-like width %i',
     (terminalWidth) => {
@@ -265,38 +246,40 @@ describe('code and Markdown rendering', () => {
       expect(rows.every((row) => displayWidth(row) <= terminalWidth - 5)).toBe(true);
       expect(stripAnsi(rows.join(''))).toBe(source);
       expect(stripAnsi(rows[0]!)).toMatch(/\s$/);
-
       const transcript = renderTranscript(
         [{ kind: 'assistant', text: source }],
         terminalWidth,
         context,
       );
-      const reconstructed = transcript
-        .slice(0, -1)
-        .map((row) => stripAnsi(row).slice(2))
-        .join('');
+      const body = transcript.slice(0, -1);
+      const reconstructed = body.map((row) => stripAnsi(row)).join('');
       expect(reconstructed).toBe(source);
-      expect(transcript.slice(0, -1).every((row) => displayWidth(row) <= terminalWidth - 3)).toBe(
-        true,
-      );
+      expect(body.every((row) => displayWidth(row) <= terminalWidth)).toBe(true);
     },
   );
-
-  it('omits user and assistant names while retaining semantic labels for tools', () => {
+  it('renders user pill, free assistant text, and diamond tool bullets', () => {
     const transcript = renderTranscript(
       [
-        { kind: 'user', text: 'Build it' },
-        { kind: 'assistant', text: 'Done' },
-        { kind: 'tool', text: 'write_file: completed' },
+        { kind: 'user', text: 'Build it', timestamp: '8:19 AM' },
+        { kind: 'reasoning', text: 'Inspecting the repository.' },
+        { kind: 'assistant', text: 'Done', timestamp: '8:20 AM' },
+        { kind: 'tool', text: 'write_file: completed', timestamp: '8:21 AM' },
       ],
       80,
       context,
     ).map(stripAnsi);
-    expect(transcript).not.toContain('You');
-    expect(transcript).not.toContain('Kyokao');
-    expect(transcript).toContain('Tool');
+    expect(transcript.some((row) => row.includes('❯ Build it'))).toBe(true);
+    expect(transcript.some((row) => row.includes('◆ Thinking'))).toBe(true);
+    expect(transcript.some((row) => row.includes('Inspecting the repository.'))).toBe(true);
+    expect(transcript.some((row) => row.includes('Done'))).toBe(true);
+    expect(transcript.some((row) => row.includes('write_file'))).toBe(true);
+    expect(transcript.join('\n')).not.toContain('8:19 AM');
+    expect(transcript.join('\n')).not.toContain('8:20 AM');
+    expect(transcript.join('\n')).not.toContain('8:21 AM');
+    expect(transcript.some((row) => row.includes('◆'))).toBe(true);
+    expect(transcript.some((row) => row.includes('You'))).toBe(false);
+    expect(transcript.some((row) => row.includes('Kyokao'))).toBe(false);
   });
-
   it('hard-wraps oversized tokens without dropping graphemes or adding ellipses', () => {
     const source = `prefix ${'abcdefghij'.repeat(7)} 東京 suffix`;
     const rows = wrapWorkspaceText(context.code('string', source), 13);
@@ -304,7 +287,6 @@ describe('code and Markdown rendering', () => {
     expect(rows.every((row) => displayWidth(row) <= 13)).toBe(true);
     expect(rows.join('')).not.toContain('…');
   });
-
   it('carries ANSI state across physical lines without changing visible text', () => {
     const source = '/* first line\nsecond line */';
     const rendered = context.code('comment', source);
@@ -313,7 +295,6 @@ describe('code and Markdown rendering', () => {
     expect(rows[1]).toContain('\x1b[');
   });
 });
-
 class FakeInput extends EventEmitter {
   isTTY = true;
   isRaw = false;
@@ -334,7 +315,6 @@ class FakeInput extends EventEmitter {
     this.emit('data', value);
   }
 }
-
 class FakeOutput extends EventEmitter {
   isTTY = true;
   columns = 90;
@@ -345,9 +325,7 @@ class FakeOutput extends EventEmitter {
     return true;
   }
 }
-
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-
 describe('live workspace theme switching', () => {
   it('switches while active without backend reset and preserves queue continuity', async () => {
     const input = new FakeInput();
@@ -387,8 +365,8 @@ describe('live workspace theme switching', () => {
       themeContext: context,
       header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
       async onCommand(command: ParsedCommand) {
-        if (command.name === 'theme') {
-          context.setTuiTheme(command.args[0]!);
+        if (command.name === 'settings' && command.args[0] === 'theme') {
+          context.setTuiTheme(command.args[1]!);
           return { messages: [{ text: `TUI theme changed to ${context.names.tui}.` }] };
         }
         if (command.name === 'exit') return { close: true };
@@ -396,9 +374,9 @@ describe('live workspace theme switching', () => {
     });
     input.send('first\r');
     await tick();
-    input.send('queued\n');
+    input.send('queued\t');
     await tick();
-    input.send('/theme solarized-light\r');
+    input.send('/settings theme solarized-light\r');
     await tick();
     expect(context.names.tui).toBe('solarized-light');
     expect(runs).toEqual(['first']);

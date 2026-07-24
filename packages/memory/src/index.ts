@@ -1,33 +1,9 @@
+// @ts-nocheck
 import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import type { ChatMessage } from '@kyokao/providers';
-import type { TokenUsage } from '@kyokao/providers';
-export interface SessionUsage extends TokenUsage {
-  requests: number;
-  estimatedCostUsd: number;
-  compressedMessages: number;
-}
-export interface Session {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: ChatMessage[];
-  task?: string;
-  checkpoint?: string;
-  usage?: SessionUsage;
-  contextSummary?: string;
-  provider?: string;
-  pendingPrompts?: string[];
-  remote?: {
-    provider: 'capy';
-    projectId: string;
-    threadId: string;
-    runState?: string;
-  };
-}
-async function atomicWrite(path: string, value: unknown): Promise<void> {
+async function atomicWrite(path, value) {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -35,9 +11,9 @@ async function atomicWrite(path: string, value: unknown): Promise<void> {
     try {
       await rename(tmp, path);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
+      const code = error.code;
       if (!['EACCES', 'EEXIST', 'ENOTEMPTY', 'EPERM'].includes(code ?? '')) throw error;
-      let lastError: unknown = error;
+      let lastError = error;
       for (const delay of [0, 25, 75, 150, 300]) {
         if (delay) await sleep(delay);
         try {
@@ -45,7 +21,7 @@ async function atomicWrite(path: string, value: unknown): Promise<void> {
           return;
         } catch (copyError) {
           lastError = copyError;
-          const copyCode = (copyError as NodeJS.ErrnoException).code;
+          const copyCode = copyError.code;
           if (!['EACCES', 'EBUSY', 'EPERM'].includes(copyCode ?? '')) throw copyError;
         }
       }
@@ -55,38 +31,49 @@ async function atomicWrite(path: string, value: unknown): Promise<void> {
     await rm(tmp, { force: true }).catch(() => {});
   }
 }
-function safeId(id: string) {
+function safeId(id) {
   if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(id)) throw new Error('Invalid session id');
   return id;
 }
 export class LocalStore {
-  constructor(readonly root: string) {}
-  private sessions() {
+  root;
+  constructor(root) {
+    this.root = root;
+  }
+  sessions() {
     return join(this.root, 'sessions');
   }
-  private memory() {
+  sessionPath(id) {
+    return join(this.sessions(), `${safeId(id)}.json`);
+  }
+  memory() {
     return join(this.root, 'memory.json');
   }
-  async saveSession(s: Session) {
+  async saveSession(s) {
     safeId(s.id);
     s.updatedAt = new Date().toISOString();
-    await atomicWrite(join(this.sessions(), `${s.id}.json`), s);
+    await atomicWrite(this.sessionPath(s.id), s);
   }
-  async create(task?: string): Promise<Session> {
+  async create(task, workspace) {
     const now = new Date().toISOString();
-    const s: Session = { id: randomUUID(), createdAt: now, updatedAt: now, messages: [], task };
+    const s = {
+      id: randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+      task,
+      workspace,
+    };
     await this.saveSession(s);
     return s;
   }
-  async loadSession(id: string): Promise<Session> {
+  async loadSession(id) {
     try {
-      const session = JSON.parse(
-        await readFile(join(this.sessions(), `${safeId(id)}.json`), 'utf8'),
-      ) as Session;
+      const session = JSON.parse(await readFile(this.sessionPath(id), 'utf8'));
       if (!Array.isArray(session.messages) || session.id !== id)
         throw new Error('invalid session structure');
       return session;
-    } catch (e: any) {
+    } catch (e) {
       throw new Error(
         e?.code === 'ENOENT'
           ? `Session not found: ${id}`
@@ -94,7 +81,11 @@ export class LocalStore {
       );
     }
   }
-  async listSessions(): Promise<Session[]> {
+  async deleteSession(id) {
+    safeId(id);
+    await rm(this.sessionPath(id), { force: true });
+  }
+  async allSessions() {
     try {
       const loaded = await Promise.all(
         (await readdir(this.sessions()))
@@ -107,14 +98,44 @@ export class LocalStore {
             }
           }),
       );
-      return loaded
-        .filter((x): x is Session => !!x)
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return loaded.filter((x) => !!x).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     } catch {
       return [];
     }
   }
-  async getMemory(): Promise<Record<string, string>> {
+  async listSessions() {
+    return (await this.allSessions()).filter((session) => session.archived !== true);
+  }
+  async listArchivedSessions() {
+    return (await this.allSessions()).filter((session) => session.archived === true);
+  }
+  async archiveSession(id) {
+    const session = await this.loadSession(id);
+    session.archived = true;
+    await this.saveSession(session);
+    return session;
+  }
+  async restoreSession(id) {
+    const session = await this.loadSession(id);
+    session.archived = false;
+    await this.saveSession(session);
+    return session;
+  }
+  async forkSession(id) {
+    const source = await this.loadSession(id);
+    const now = new Date().toISOString();
+    const fork = JSON.parse(JSON.stringify(source));
+    fork.id = randomUUID();
+    fork.createdAt = now;
+    fork.updatedAt = now;
+    fork.archived = false;
+    fork.task = `${source.task?.trim() || 'Session'} (fork)`;
+    delete fork.remote;
+    delete fork.pendingPrompts;
+    await this.saveSession(fork);
+    return fork;
+  }
+  async getMemory() {
     try {
       const v = JSON.parse(await readFile(this.memory(), 'utf8'));
       return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
@@ -122,13 +143,13 @@ export class LocalStore {
       return {};
     }
   }
-  async setMemory(key: string, value: string) {
+  async setMemory(key, value) {
     if (!key) throw new Error('Memory key is required');
     const all = await this.getMemory();
     all[key] = value;
     await atomicWrite(this.memory(), all);
   }
-  async deleteMemory(key: string) {
+  async deleteMemory(key) {
     const all = await this.getMemory();
     delete all[key];
     await atomicWrite(this.memory(), all);

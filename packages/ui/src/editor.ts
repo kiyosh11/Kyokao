@@ -70,12 +70,26 @@ export type EditorKey =
   | 'home'
   | 'end'
   | 'ctrl-a'
+  | 'ctrl-b'
+  | 'ctrl-d'
   | 'ctrl-e'
+  | 'ctrl-f'
+  | 'ctrl-g'
+  | 'ctrl-h'
   | 'ctrl-u'
   | 'ctrl-k'
+  | 'ctrl-l'
+  | 'ctrl-n'
+  | 'ctrl-o'
+  | 'ctrl-p'
+  | 'ctrl-r'
+  | 'ctrl-s'
+  | 'ctrl-t'
   | 'ctrl-w'
+  | 'ctrl-y'
   | 'alt-left'
   | 'alt-right'
+  | 'alt-delete'
   | 'enter'
   | 'newline'
   | 'queue'
@@ -98,21 +112,52 @@ const sequences: Array<[string, EditorKey]> = [
   ['\x1b[13;3u', 'newline'],
   ['\x1b[13;5u', 'queue'],
   ['\x1b[27;5;97~', 'ctrl-a'],
+  ['\x1b[27;5;98~', 'ctrl-b'],
   ['\x1b[27;5;99~', 'interrupt'],
+  ['\x1b[27;5;100~', 'ctrl-d'],
   ['\x1b[27;5;101~', 'ctrl-e'],
-  ['\x1b[27;5;106~', 'queue'],
+  ['\x1b[27;5;102~', 'ctrl-f'],
+  ['\x1b[27;5;103~', 'ctrl-g'],
+  ['\x1b[27;5;104~', 'ctrl-h'],
+  ['\x1b[27;5;106~', 'newline'],
   ['\x1b[27;5;107~', 'ctrl-k'],
+  ['\x1b[27;5;108~', 'ctrl-l'],
+  ['\x1b[27;5;110~', 'ctrl-n'],
+  ['\x1b[27;5;111~', 'ctrl-o'],
+  ['\x1b[27;5;112~', 'ctrl-p'],
+  ['\x1b[27;5;114~', 'ctrl-r'],
+  ['\x1b[27;5;115~', 'ctrl-s'],
+  ['\x1b[27;5;116~', 'ctrl-t'],
   ['\x1b[27;5;117~', 'ctrl-u'],
   ['\x1b[27;5;119~', 'ctrl-w'],
+  ['\x1b[27;5;121~', 'ctrl-y'],
   ['\x1b[97;5u', 'ctrl-a'],
+  ['\x1b[98;5u', 'ctrl-b'],
   ['\x1b[99;5u', 'interrupt'],
+  ['\x1b[100;5u', 'ctrl-d'],
   ['\x1b[101;5u', 'ctrl-e'],
-  ['\x1b[106;5u', 'queue'],
+  ['\x1b[102;5u', 'ctrl-f'],
+  ['\x1b[103;5u', 'ctrl-g'],
+  ['\x1b[104;5u', 'ctrl-h'],
+  ['\x1b[106;5u', 'newline'],
   ['\x1b[107;5u', 'ctrl-k'],
+  ['\x1b[108;5u', 'ctrl-l'],
+  ['\x1b[110;5u', 'ctrl-n'],
+  ['\x1b[111;5u', 'ctrl-o'],
+  ['\x1b[112;5u', 'ctrl-p'],
+  ['\x1b[114;5u', 'ctrl-r'],
+  ['\x1b[115;5u', 'ctrl-s'],
+  ['\x1b[116;5u', 'ctrl-t'],
   ['\x1b[117;5u', 'ctrl-u'],
   ['\x1b[119;5u', 'ctrl-w'],
+  ['\x1b[121;5u', 'ctrl-y'],
   ['\x1b[1;3D', 'alt-left'],
   ['\x1b[1;3C', 'alt-right'],
+  ['\x1b[1;5D', 'alt-left'],
+  ['\x1b[1;5C', 'alt-right'],
+  ['\x1b[3;3~', 'alt-delete'],
+  ['\x1b\x7f', 'ctrl-w'],
+  ['\x1bd', 'alt-delete'],
   ['\x1b[3~', 'delete'],
   ['\x1b[5~', 'page-up'],
   ['\x1b[6~', 'page-down'],
@@ -131,6 +176,28 @@ const sequences: Array<[string, EditorKey]> = [
 ];
 const pasteStart = '\x1b[200~';
 const pasteEnd = '\x1b[201~';
+const controlCharacters: Readonly<Record<string, EditorKey>> = {
+  '\x01': 'ctrl-a',
+  '\x02': 'ctrl-b',
+  '\x03': 'interrupt',
+  '\x04': 'ctrl-d',
+  '\x05': 'ctrl-e',
+  '\x06': 'ctrl-f',
+  '\x07': 'ctrl-g',
+  '\x08': 'ctrl-h',
+  '\x0a': 'newline',
+  '\x0b': 'ctrl-k',
+  '\x0c': 'ctrl-l',
+  '\x0e': 'ctrl-n',
+  '\x0f': 'ctrl-o',
+  '\x10': 'ctrl-p',
+  '\x12': 'ctrl-r',
+  '\x13': 'ctrl-s',
+  '\x14': 'ctrl-t',
+  '\x15': 'ctrl-u',
+  '\x17': 'ctrl-w',
+  '\x19': 'ctrl-y',
+};
 
 export class TerminalInputParser {
   private buffer = '';
@@ -183,25 +250,11 @@ export class TerminalInputParser {
       const key: EditorKey | undefined =
         character === '\r'
           ? 'enter'
-          : character === '\n'
-            ? 'queue'
-            : character === '\x7f' || character === '\b'
-              ? 'backspace'
-              : character === '\t'
-                ? 'tab'
-                : character === '\x03'
-                  ? 'interrupt'
-                  : character === '\x01'
-                    ? 'ctrl-a'
-                    : character === '\x05'
-                      ? 'ctrl-e'
-                      : character === '\x15'
-                        ? 'ctrl-u'
-                        : character === '\x0b'
-                          ? 'ctrl-k'
-                          : character === '\x17'
-                            ? 'ctrl-w'
-                            : undefined;
+          : character === '\x7f'
+            ? 'backspace'
+            : character === '\t'
+              ? 'tab'
+              : controlCharacters[character];
       if (key) events.push({ type: 'key', key });
       else if (character >= ' ') events.push({ type: 'text', text: character });
     }
@@ -287,22 +340,31 @@ export class EditorState {
     this.preferredColumn = undefined;
   }
 
-  killBefore(): void {
+  killBefore(): string {
     const start = this.lineStart();
-    this.content.splice(start, this.cursor - start);
+    const removed = this.content.splice(start, this.cursor - start).join('');
     this.cursor = start;
+    return removed;
   }
 
-  killAfter(): void {
-    this.content.splice(this.cursor, this.lineEnd() - this.cursor);
+  killAfter(): string {
+    return this.content.splice(this.cursor, this.lineEnd() - this.cursor).join('');
   }
 
-  deleteWordBefore(): void {
+  deleteWordBefore(): string {
     let start = this.cursor;
     while (start > 0 && /\s/u.test(this.content[start - 1]!)) start--;
     while (start > 0 && !/\s/u.test(this.content[start - 1]!)) start--;
-    this.content.splice(start, this.cursor - start);
+    const removed = this.content.splice(start, this.cursor - start).join('');
     this.cursor = start;
+    return removed;
+  }
+
+  deleteWordAfter(): string {
+    let end = this.cursor;
+    while (end < this.content.length && /\s/u.test(this.content[end]!)) end++;
+    while (end < this.content.length && !/\s/u.test(this.content[end]!)) end++;
+    return this.content.splice(this.cursor, end - this.cursor).join('');
   }
 
   wordLeft(): void {
@@ -352,7 +414,7 @@ export function layoutEditor(
 ): { rows: string[]; cursor: { row: number; column: number } } {
   const safeWidth = Math.max(1, width);
   const values = graphemes(value);
-  const rows = ['› '];
+  const rows = ['❯ '];
   let row = 0;
   let column = Math.min(2, safeWidth - 1);
   let cursorPosition = { row, column };

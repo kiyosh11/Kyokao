@@ -34,6 +34,9 @@ It is a local command-line application with a full-screen terminal interface. Re
 - MCP stdio servers and JavaScript ESM plugins can add tools to the same permissioned loop.
 - Local JSON sessions that can be listed and resumed, plus a manual key/value memory store.
 - Context compression, token/cost estimates, model capability catalog, availability validation, configuration layers, named profiles, model aliases, redacted config inspection/export, and setup diagnostics.
+- Headless output formats (`--output-format plain|json|streaming-json`) for bots and scripts.
+- Optional sub-agents (`--subagents`) that delegate scoped, read-only-by-default sub-tasks to isolated agent sessions.
+- An Agent Client protocol (`kyokao agent-client`) exposing a JSON-RPC 2.0 over stdio wire format for IDE and tool integration.
 
 ## Requirements and installation
 
@@ -42,7 +45,7 @@ Kyokao requires **Node.js 20 or later** and **Git**. Building from source uses t
 ### Build and run from source
 
 ```bash
-git clone https://github.com/kiyosh11/maybetest.git kyokao
+git clone https://github.com/kiyosh11/Kyokao.git kyokao
 cd kyokao
 corepack enable
 pnpm install --frozen-lockfile
@@ -54,7 +57,7 @@ pnpm --filter kyokao start "inspect this repository"
 PowerShell:
 
 ```powershell
-git clone https://github.com/kiyosh11/maybetest.git kyokao
+git clone https://github.com/kiyosh11/Kyokao.git kyokao
 Set-Location kyokao
 corepack enable
 pnpm install --frozen-lockfile
@@ -73,7 +76,7 @@ The CLI package is bundled during its build. Packing also copies the root README
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter kyokao pack
-npm install -g ./kyokao-0.5.5.tgz
+npm install -g ./kyokao-0.8.0.tgz
 kyokao --help
 ```
 
@@ -87,13 +90,13 @@ PowerShell uses the same `npm` commands:
 
 ```powershell
 pnpm --filter kyokao pack
-npm install -g .\kyokao-0.5.5.tgz
+npm install -g .\kyokao-0.8.0.tgz
 npm uninstall -g kyokao
 ```
 
 ## Quickstart
 
-Set an API key only in your shell or a secret manager; do not commit it to `.kyokao.json`.
+Set an API key only in your shell or a secret manager; do not commit it to `~/.kyokao/config.json`.
 
 ```bash
 export OPENAI_API_KEY='replace-with-your-key'
@@ -119,31 +122,41 @@ Choose a provider
   openai — Hosted API (OPENAI_API_KEY)
 ```
 
-Hosted API-key input is masked. A present preset environment variable is reported as `environment` and is never copied into the config; local Ollama, LM Studio, and vLLM presets do not require a key. The review screen shows only a key source (`environment`, `saved`, or `not configured`), not key contents. Setup writes the selected provider, model, and approval mode to `~/.config/kyokao/config.json` on Linux (or the platform config location), preserving unrelated global settings. A manually entered key is stored locally with mode `0600`; prefer an environment variable when feasible. Re-run the flow with `kyokao config setup`.
+Hosted API-key input is masked. A present preset environment variable is reported as `environment` and is never copied into the config; local Ollama, LM Studio, and vLLM presets do not require a key. The review screen shows only a key source (`environment`, `saved`, or `not configured`), not key contents. Setup writes the selected provider, model, and approval mode to `~/.kyokao/config.json`, preserving unrelated global settings. A manually entered key is stored locally with mode `0600`; prefer an environment variable when feasible. Re-run the flow with `kyokao setup`.
 
 ```bash
 kyokao
 # setup: Up/Down or j/k select, Enter continues, Escape goes back, Ctrl-C cancels
-# workspace: Enter submits/replaces; Shift-Enter or Alt-Enter inserts a newline; Ctrl-Enter queues
+# workspace: Enter submits/replaces; Shift/Alt-Enter or Ctrl-J inserts a newline; Tab queues while busy
 # type / to filter commands, then use Up/Down and Enter
 ```
 
-The bordered composer remains editable while an agent runs. Enter cancels/stops the active turn and starts the new prompt before existing queued work; Ctrl-Enter queues without interruption. Shift-Enter inserts a newline when the terminal reports CSI-u or xterm `modifyOtherKeys`; unsupported terminals and Windows terminal stacks that strip modifiers must use Alt-Enter as the compatibility fallback. Legacy Ctrl-J/LF is treated as Ctrl-Enter. Bracketed multiline paste remains literal. `/queue`, `/queue clear`, and `/queue retry` inspect, clear, and retry pending work.
+The bordered composer remains editable while an agent runs. Enter cancels/stops the active turn and starts the new prompt before existing queued work; Tab queues without interruption. Shift-Enter inserts a newline when the terminal reports CSI-u or xterm `modifyOtherKeys`; Alt-Enter is the compatibility fallback, and Ctrl-J also inserts a newline. Bracketed multiline paste remains literal. `/queue`, `/queue clear`, and `/queue retry` inspect, clear, and retry pending work.
 
-The workspace keeps one local session until `/new`. It streams provider output, tool activity, and tool results into the transcript. The composer border carries the current status, and cumulative token/cost usage appears at the right of the shortcut footer when space permits. On exit, the restored shell receives a resumable session command; `/new` clears that hint. Usage is returned or calculated by the existing agent and does not claim hidden reasoning or exact provider billing.
+The workspace keeps one local session until `/new`. It streams provider output, tool activity, and tool results into a timestamped transcript. The live strip shows elapsed activity, token usage, and the stop control. The bordered composer stays pinned to the bottom with the active model and approval mode, followed by the context counter and keyboard legend. Escape interrupts an active prompt; Ctrl-C cancels while busy and exits while idle. Ctrl-T opens the transcript view, Ctrl-G opens the draft in the configured editor, Ctrl-O copies the last response, Ctrl-L clears the visible transcript, and `?` opens the shortcut view. Ctrl-R/Ctrl-S browse history, while standard Emacs editing bindings are supported. On exit, the restored shell receives a resumable session command; `/new` clears that hint.
 
-| Slash command                                              | Purpose                                                                                                                                                                                                              |
-| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/help [command]`                                          | Show command help and argument syntax.                                                                                                                                                                               |
-| `/new`, `/clear`, `/exit`                                  | Start a new session, clear visible output, or leave the workspace.                                                                                                                                                   |
-| `/sessions`, `/resume <id>`                                | List or resume local sessions.                                                                                                                                                                                       |
-| `/model [id]`, `/provider [name\|key]`, `/approval [mode]` | Inspect or change the active runtime setting. Provider selection reuses saved credentials; `/provider key` explicitly replaces the active provider's token. Approval accepts `suggest`, `auto-edit`, or `full-auto`. |
-| `/memory [list\|set <key> <value>\|delete <key>]`          | Inspect or manage local memory.                                                                                                                                                                                      |
-| `/doctor`, `/diff`                                         | Run setup diagnostics or show the workspace diff.                                                                                                                                                                    |
-| `/queue [clear\|retry]`, `/capy`                           | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                                                                                   |
-| `/theme [name\|code <name>\|save]`                         | Preview or immediately switch TUI/code themes; explicitly save both choices globally.                                                                                                                                |
+| Slash command                                                                             | Purpose                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help [command]`                                                                         | Show command help and argument syntax.                                                                                                                                                                                                                                     |
+| `/new`, `/clear`, `/exit`, `/quit`                                                        | Start a new session, clear visible output, or leave the workspace.                                                                                                                                                                                                         |
+| `/sessions`, `/resume <id>`                                                               | List or resume local sessions.                                                                                                                                                                                                                                             |
+| `/fork`, `/archive`, `/archive list`, `/archive restore`, `/delete`, `/rollout`           | Fork, archive, restore, confirm-delete, or inspect the storage record for a saved session. Capy archive/restore actions are also sent to the remote thread API.                                                                                                            |
+| `/model [id]`, `/provider [name [model]\|key]`, `/approval [mode]`, `/permissions [mode]` | Inspect or change the active runtime setting. Provider selection reuses saved credentials; a model can be supplied when switching providers, and `/provider key` explicitly replaces the active provider's token. Approval accepts `suggest`, `auto-edit`, or `full-auto`. |
+| `/memory [list\|set <key> <value>\|delete <key>]`                                         | Inspect or manage local memory.                                                                                                                                                                                                                                            |
+| `/goal`, `/personality`, `/skills`, `/mention`, `/init`, `/import`                        | Set session instructions, invoke installed skills, mention workspace files, or create/import `AGENTS.md`.                                                                                                                                                                  |
+| `/doctor`, `/diff`, `/review [instructions]`                                              | Run setup diagnostics, show the workspace diff, or start a code review.                                                                                                                                                                                                    |
+| `/queue [clear\|retry]`, `/capy`                                                          | Manage pending prompts or show Capy project/thread/task/PR status.                                                                                                                                                                                                         |
+| `/threads [query]`, `/task <id>`, `/diff <taskId>`                                        | Browse Capy threads, inspect a task, or render its remote diff.                                                                                                                                                                                                            |
+| `/tags [list\|set\|create]`, `/usage [orgId] [from] [to]`                                 | Manage Capy thread tags or inspect API usage for an ISO/date range.                                                                                                                                                                                                        |
+| `/context`, `/status`, `/compact`, `/rewind`                                              | Inspect session/context status, compress saved history, or remove the latest turn.                                                                                                                                                                                         |
+| `/plan`, `/view-plan`, `/rename <title>`, `/copy`                                         | Manage the saved plan/title or copy the latest assistant response.                                                                                                                                                                                                         |
+| `/settings`                                                                               | Open the persistent settings picker above the composer. Toggle thinking/subagents directly or choose provider, model, permissions, TUI theme, and code theme.                                                                                                              |
+| `/mcp`, `/plugins`, `/keymap`                                                             | Inspect configured integrations or show the active Codex-compatible keyboard map.                                                                                                                                                                                          |
+| `/ps`, `/stop`, `/raw`, `/debug-config`, `/subagents`, `/apps`, `/logout`                 | Inspect/control active work, open the raw transcript, diagnose redacted configuration, manage local subagents/integrations, or remove a saved provider key.                                                                                                                |
 
-Finite choices open as arrow-selectable drop-ups inside the composer. `/help` browses command help, `/model` includes fetched provider models and aliases, `/resume` shows saved sessions, and `/memory delete` shows existing keys. Provider rows show only provider names; selecting one opens masked token entry in the same composer. Enter saves the token to the user’s global Kyokao config and applies the provider, while Escape cancels. Token text is never rendered, added to prompt history, or written to the transcript.
+Kyokao recognizes the current Codex commands relevant to its terminal workflow. Commands that require a Codex-only IDE, desktop bridge, Vim editor, hook engine, additional sandbox roots, side conversations, or status-line customization report that the capability is unavailable; they never claim a no-op succeeded.
+
+Finite choices open as arrow-selectable drop-ups inside the composer. `/help` browses command help, `/model` includes fetched provider models and aliases, `/resume` shows saved sessions, and `/memory delete` shows existing keys. Provider rows show only provider names; selecting one opens masked token entry in the same composer. Capy then presents the API token’s accessible projects, Captain-eligible models, and Build models as separate scrollable choices before activation. The order is key → project → Captain model → Build model, matching Capy’s `projectId`, `model`, and `buildModel` thread fields. Enter saves the completed provider selection to the user’s global Kyokao config, while Escape cancels. Token text is never rendered, added to prompt history, or written to the transcript.
 
 Unknown slash commands are rejected locally and are never sent to the model. One-shot prompts and piped standard input remain script-friendly and do not start the workspace.
 
@@ -158,55 +171,75 @@ pnpm --filter kyokao start -p groq -m llama-3.3-70b-versatile "inspect this repo
 
 `kyokao --help` is the installed CLI’s authoritative command list. The global options are:
 
-| Option                   | Meaning                                                                                                |
-| ------------------------ | ------------------------------------------------------------------------------------------------------ |
-| `-m, --model <id>`       | Model ID or configured alias.                                                                          |
-| `-p, --provider <name>`  | Built-in preset or configured provider name.                                                           |
-| `--base-url <url>`       | Override the selected provider base URL for this invocation.                                           |
-| `--api-key <key>`        | Override the API key for this invocation; it is not persisted. Avoid putting secrets in shell history. |
-| `--approval <mode>`      | `suggest`, `auto-edit`, or `full-auto`.                                                                |
-| `--theme <name>`         | TUI theme for this invocation.                                                                         |
-| `--code-theme <name>`    | Fenced code and Markdown theme for this invocation.                                                    |
-| `--profile <name>`       | Select a configuration profile.                                                                        |
-| `--max-iterations <n>`   | Agent loop limit; an integer from 1 through 100.                                                       |
-| `--temperature <n>`      | Sampling temperature from 0 through 2.                                                                 |
-| `--max-tokens <n>`       | Maximum completion tokens.                                                                             |
-| `--top-p <n>`            | Nucleus sampling probability from greater than 0 through 1.                                            |
-| `--fallback-model <ids>` | Comma-separated model IDs to try after a provider failure.                                             |
-| `--editor <command>`     | Editor command for this invocation.                                                                    |
-| `--max-cost <usd>`       | Stop after the estimated run cost reaches this amount; 0 means unlimited.                              |
-| `-V, --version`          | Print the CLI version.                                                                                 |
-| `-h, --help`             | Print help.                                                                                            |
+| Option                   | Meaning                                                                                                                                                                                                                    |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-m, --model <id>`       | Model ID or configured alias.                                                                                                                                                                                              |
+| `-p, --provider <name>`  | Built-in preset or configured provider name.                                                                                                                                                                               |
+| `--base-url <url>`       | Override the selected provider base URL for this invocation.                                                                                                                                                               |
+| `--api-key <key>`        | Override the API key for this invocation; it is not persisted. Avoid putting secrets in shell history.                                                                                                                     |
+| `--approval <mode>`      | `suggest`, `auto-edit`, or `full-auto`.                                                                                                                                                                                    |
+| `--theme <name>`         | TUI theme for this invocation.                                                                                                                                                                                             |
+| `--code-theme <name>`    | Fenced code and Markdown theme for this invocation.                                                                                                                                                                        |
+| `--profile <name>`       | Select a configuration profile.                                                                                                                                                                                            |
+| `--max-iterations <n>`   | Agent loop limit; an integer from 1 through 100.                                                                                                                                                                           |
+| `--temperature <n>`      | Sampling temperature from 0 through 2.                                                                                                                                                                                     |
+| `--max-tokens <n>`       | Maximum completion tokens.                                                                                                                                                                                                 |
+| `--top-p <n>`            | Nucleus sampling probability from greater than 0 through 1.                                                                                                                                                                |
+| `--fallback-model <ids>` | Comma-separated model IDs to try after a provider failure.                                                                                                                                                                 |
+| `--editor <command>`     | Editor command for this invocation.                                                                                                                                                                                        |
+| `--max-cost <usd>`       | Stop after the estimated run cost reaches this amount; 0 means unlimited.                                                                                                                                                  |
+| `--output-format <fmt>`  | Headless output format: `plain` (human text), `json` (single aggregated object), or `streaming-json` (one NDJSON line per event). Default honors an explicit value, else `plain` in a TTY and `streaming-json` when piped. |
+| `--subagents`            | Enable the `spawn_subagent` tool so the agent can delegate scoped sub-tasks to isolated sub-agents. Off by default.                                                                                                        |
+| `-V, --version`          | Print the CLI version.                                                                                                                                                                                                     |
+| `-h, --help`             | Print help.                                                                                                                                                                                                                |
 
-The default invocation accepts `[prompt...]`: with words it runs them as one prompt; without words it starts the terminal workspace in a TTY, or reads all piped standard input otherwise. `chat` is a compatibility alias for that workspace.
+The default invocation accepts `[prompt...]`: with words it runs them as one prompt; without words it starts the terminal workspace in a TTY, or reads all piped standard input otherwise. `kyokao --help` prints the authoritative, section-grouped command list. Commands are organized under headers (Interactive, Agent-assisted, Configuration, Sessions & memory, Providers & themes, Listings, Diagnostics, Integration).
 
-| Command                    | What it does                                                                                               | Example                                                         |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `chat`                     | Starts the interactive terminal workspace.                                                                 | `kyokao chat`                                                   |
-| `tui`                      | Starts the interactive terminal workspace.                                                                 | `kyokao tui`                                                    |
-| `models`                   | Requests `/models` from the selected provider and prints returned IDs.                                     | `kyokao -p openrouter models`                                   |
-| `catalog`                  | Prints known context, pricing, and tool-capability metadata.                                               | `kyokao catalog`                                                |
-| `usage [id]`               | Prints saved token, cost, and compression usage for one or all sessions.                                   | `kyokao usage`                                                  |
-| `plugins`                  | Lists configured JavaScript/TypeScript plugin modules.                                                     | `kyokao plugins`                                                |
-| `mcp`                      | Lists configured MCP stdio servers.                                                                        | `kyokao mcp`                                                    |
-| `edit <path>`              | Opens a workspace file in the configured editor.                                                           | `kyokao edit src/index.ts`                                      |
-| `providers`                | Prints built-in preset names and base URLs.                                                                | `kyokao providers`                                              |
-| `themes`                   | Previews all built-in TUI/code themes and marks the active choices.                                        | `kyokao themes`                                                 |
-| `config setup`             | Re-runs the interactive provider, model, and approval setup flow.                                          | `kyokao config setup`                                           |
-| `config show`              | Prints the resolved non-profile config with key/token/secret/password fields redacted.                     | `kyokao config show`                                            |
-| `config path`              | Prints the global config path.                                                                             | `kyokao config path`                                            |
-| `config export <file>`     | Atomically writes a redacted resolved non-profile config.                                                  | `kyokao config export /tmp/kyokao-config.json`                  |
-| `sessions`                 | Lists local sessions for the current workspace.                                                            | `kyokao sessions`                                               |
-| `resume <id> <prompt...>`  | Adds a follow-up to a saved session.                                                                       | `kyokao resume 123e4567-e89b-12d3-a456-426614174000 "continue"` |
-| `memory list`              | Prints the workspace’s manual memory object.                                                               | `kyokao memory list`                                            |
-| `memory set <key> <value>` | Stores a string value in manual local memory.                                                              | `kyokao memory set convention "use pnpm"`                       |
-| `memory delete <key>`      | Deletes a manual memory key.                                                                               | `kyokao memory delete convention`                               |
-| `doctor`                   | Prints Node version, workspace, provider URL, credential presence, sandbox status, and model availability. | `kyokao doctor`                                                 |
-| `diff`                     | Displays the working-tree diff through the read-only Git tool.                                             | `kyokao diff`                                                   |
-| `commit [prompt...]`       | Asks the agent to review, test, then create a commit if ready.                                             | `kyokao commit "include the README"`                            |
-| `explain [prompt...]`      | Asks the agent to explain repository structure and relevant implementation.                                | `kyokao explain "focus on config"`                              |
-| `test [prompt...]`         | Asks the agent to run relevant tests and safely diagnose/fix failures.                                     | `kyokao test`                                                   |
-| `review [prompt...]`       | Asks the agent to review current changes for bugs, security risks, and missing tests.                      | `kyokao review "focus on changed files"`                        |
+| Group              | Command                           | What it does                                                                                           | Example                                        |
+| ------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Interactive        | `[prompt...]` (default)           | Run a prompt; TTY opens the workspace, otherwise one-shot or piped.                                    | `kyokao "explain this repo"`                   |
+| Interactive        | `run [prompt...]`                 | Explicit headless entry (alias of the bare invocation).                                                | `kyokao run "ship it" --output-format json`    |
+| Interactive        | `tui`                             | Start the interactive terminal workspace.                                                              | `kyokao tui`                                   |
+| Agent-assisted     | `commit [prompt...]`              | Review changes, run checks, then create a commit if ready. Flags: `-m, --message <m>`, `--no-verify`.  | `kyokao commit -m "fix login"`                 |
+| Agent-assisted     | `review [prompt...]`              | Review current changes for bugs, security risks, and missing tests. Flag: `-b, --base <ref>`.          | `kyokao review --base main`                    |
+| Agent-assisted     | `test [prompt...]`                | Run relevant tests and safely diagnose/fix failures. Accepts `-- <test-args>` passthrough.             | `kyokao test -- --grep auth`                   |
+| Agent-assisted     | `explain [prompt...]`             | Explain repository structure and relevant implementation.                                              | `kyokao explain "focus on config"`             |
+| Configuration      | `setup`                           | Run the first-run provider, model, and project setup wizard.                                           | `kyokao setup`                                 |
+| Configuration      | `config show`                     | Print the resolved non-profile config with secrets redacted.                                           | `kyokao config show`                           |
+| Configuration      | `config path`                     | Print the global config file path.                                                                     | `kyokao config path`                           |
+| Configuration      | `config export <file>`            | Atomically write a redacted resolved config to a file.                                                 | `kyokao config export /tmp/kyokao.json`        |
+| Sessions & memory  | `session list`                    | List local sessions for the current workspace.                                                         | `kyokao session list`                          |
+| Sessions & memory  | `session resume <id> [prompt...]` | Resume a session; with a prompt, send it as a follow-up.                                               | `kyokao session resume 123e4567 "continue"`    |
+| Sessions & memory  | `memory` (bare)                   | List all saved memory keys and values (alias of `memory list`).                                        | `kyokao memory`                                |
+| Sessions & memory  | `memory set <key> <value>`        | Save a string value under a key.                                                                       | `kyokao memory set convention "use pnpm"`      |
+| Sessions & memory  | `memory delete <key>`             | Delete a saved memory key.                                                                             | `kyokao memory delete convention`              |
+| Providers & themes | `provider use <name> [model]`     | Switch providers using an explicit or previously saved model; incomplete Capy selections are rejected. | `kyokao provider use openrouter openai/gpt-4o` |
+| Providers & themes | `provider list`                   | List built-in and configured providers.                                                                | `kyokao provider list`                         |
+| Providers & themes | `theme save [tui] [code]`         | Persist the active TUI and code themes globally.                                                       | `kyokao theme save`                            |
+| Providers & themes | `theme list`                      | Preview all built-in TUI and code themes.                                                              | `kyokao theme list`                            |
+| Listings           | `models [--known]`                | List models from the selected provider, or `--known` for the built-in catalog.                         | `kyokao -p openrouter models`                  |
+| Listings           | `providers`                       | List built-in provider presets.                                                                        | `kyokao providers`                             |
+| Listings           | `themes`                          | Preview all built-in TUI and code themes.                                                              | `kyokao themes`                                |
+| Listings           | `plugins`                         | List configured plugin modules.                                                                        | `kyokao plugins`                               |
+| Listings           | `mcp`                             | List configured MCP stdio servers.                                                                     | `kyokao mcp`                                   |
+| Listings           | `usage [id]`                      | Print token/cost/compression usage for one or all sessions.                                            | `kyokao usage`                                 |
+| Diagnostics        | `doctor`                          | Print Node version, workspace, provider URL, credentials, sandbox, and model availability.             | `kyokao doctor`                                |
+| Diagnostics        | `diff`                            | Display the working-tree diff via the read-only Git tool.                                              | `kyokao diff`                                  |
+| Integration        | `agent-client`                    | Drive the agent over a JSON-RPC 2.0 stdio protocol for IDE/bot integration.                            | `kyokao agent-client`                          |
+| Utility            | `edit <path>`                     | Open a workspace file in the configured editor.                                                        | `kyokao edit src/index.ts`                     |
+
+**Hidden back-compat aliases** (not in `--help`, still work): `chat` → `tui`, `catalog` → `models --known`, `sessions` → `session list`, `resume <id> <prompt...>` → `session resume`, `config setup` → `setup`, bare `memory` → `memory list`.
+
+### Custom agent-assisted commands
+
+`commit`, `review`, `test`, and `explain` are backed by prompt templates you can override or extend. Drop a Markdown file in `~/.kyokao/commands/<name>.md` — the first line is the description shown in `--help`, the rest is the prompt body. Placeholders:
+
+- `{{args}}` — the joined prompt arguments
+- `{{flags.<name>}}` — a named flag's value (e.g. `{{flags.message}}`)
+- `{{#flags.<name>}}…{{/flags.<name>}}` — conditional block, included only when the flag is set
+- `{{#passthrough}}…{{/passthrough}}` and `{{passthrough}}` — for commands accepting `-- <args>`
+
+A user `commit.md` overrides the built-in `commit`; a new file like `refactor.md` adds a brand-new `kyokao refactor` command. Built-in flag specs (`-m, --message` for `commit`, `-b, --base` for `review`, `--` passthrough for `test`) still apply to overridden templates.
 
 `commit`, `test`, and `review` are prompts to the agent, not dedicated Git or test engines. Their ability to change files or run commands depends on the selected approval mode.
 
@@ -238,7 +271,26 @@ The example strings are passed through unchanged; they are not a claim that a pr
 
 Run `kyokao config setup`, select `capy`, then choose a dynamically fetched Captain-eligible model and accessible project. The saved `projectId` maps work to that project's connected repositories. The first prompt creates a Capy thread; later prompts and `/resume` continue that thread. `doctor` validates token, model, and project access without starting paid work.
 
-Capy mode does **not** inspect or modify uncommitted files in the directory where Kyokao is launched. It operates on the selected Capy project's connected repositories inside Capy-managed remote VMs. Use `/capy` for run state, waiting/blocking reasons, tasks, and PR links.
+Capy mode does **not** inspect or modify uncommitted files in the directory where Kyokao is launched. It operates on the selected Capy project's connected repositories inside Capy-managed remote VMs. Use `/capy` for live run state, waiting/blocking reasons, tasks, and PR links; `/threads`, `/task`, `/diff <taskId>`, `/tags`, and `/usage` expose the related remote records.
+
+Optional defaults for newly created Capy threads use the same values as the published API:
+
+```json
+{
+  "providers": {
+    "capy": {
+      "projectId": "project-id",
+      "speed": "fast",
+      "buildModel": "gpt-5.6-terra",
+      "buildSpeed": "standard",
+      "repos": [{ "repoFullName": "owner/repo", "branch": "main" }],
+      "tags": ["cli"]
+    }
+  }
+}
+```
+
+`speed` and `buildSpeed` accept `fast` or `standard`. Tags are existing tag names, not color objects; create reusable tags with `/tags create <name> [color]`.
 
 ### Provider command examples
 
@@ -286,25 +338,18 @@ kyokao -p ollama -m llama3.2 "explain this project"
 Kyokao reads JSON only. Configuration is resolved in this order, with later defined values taking precedence:
 
 1. Built-in defaults: `openai`, `gpt-4o-mini`, `auto-edit`, `kyokao-dark`, `kyokao`, 12 iterations, a 16,000-token context budget, and compression at 80% of that budget.
-2. Global configuration.
-3. Project `.kyokao.json` in the current working directory.
-4. The selected profile, if `--profile <name>` names an existing profile.
-5. Environment, including `KYOKAO_THEME`, `KYOKAO_CODE_THEME`, `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, `KYOKAO_TEMPERATURE`, `KYOKAO_MAX_TOKENS`, `KYOKAO_TOP_P`, and `KYOKAO_FALLBACK_MODELS`.
-6. CLI options, including `--theme`, `--code-theme`, `--context-window`, model sampling flags, editor selection, and safety limits.
+2. Global configuration at `~/.kyokao/config.json`.
+3. The selected profile, if `--profile <name>` names an existing profile.
+4. Environment, including `KYOKAO_THEME`, `KYOKAO_CODE_THEME`, `KYOKAO_PROVIDER`, `KYOKAO_MODEL`, `KYOKAO_APPROVAL`, `KYOKAO_MAX_ITERATIONS`, `KYOKAO_EDITOR`, `KYOKAO_TEMPERATURE`, `KYOKAO_MAX_TOKENS`, `KYOKAO_TOP_P`, and `KYOKAO_FALLBACK_MODELS`.
+5. CLI options, including `--theme`, `--code-theme`, `--context-window`, model sampling flags, editor selection, and safety limits.
 
-Global configuration paths are:
+> **0.7.0 change:** workspace `.kyokao.json` overrides are no longer read. All state (config, sessions, memory, instructions, custom commands) lives under `~/.kyokao/`. Use [profiles](#configuration) for scoped settings. See [MIGRATION.md](MIGRATION.md) for the upgrade path.
 
-| Platform    | Path                                                                                                         |
-| ----------- | ------------------------------------------------------------------------------------------------------------ |
-| Linux/macOS | `$XDG_CONFIG_HOME/kyokao/config.json`, or `$HOME/.config/kyokao/config.json` when `XDG_CONFIG_HOME` is unset |
-| Windows     | `%APPDATA%\\kyokao\\config.json`, or `%USERPROFILE%\\kyokao\\config.json` when `APPDATA` is unset            |
-| Project     | `./.kyokao.json`                                                                                             |
-
-Use `kyokao config path` to print the active platform global path. The application does not create a config file automatically.
+The global config path is `~/.kyokao/config.json` on all platforms. Override the home directory with the `KYOKAO_HOME` environment variable for testing or non-standard layouts. Use `kyokao config path` to print the active path. The application does not create a config file automatically.
 
 ### Schema and examples
 
-The supported top-level keys are `theme`, `codeTheme`, `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, and `limits`. Provider entries can also contain Capy's required `projectId`.
+The supported top-level keys are `theme`, `codeTheme`, `provider`, `model`, `approval`, `maxIterations`, `profiles`, `providers`, `aliases`, `mcp`, `plugins`, `contextWindow`, `compressionThreshold`, `temperature`, `maxTokens`, `topP`, `fallbackModels`, `editor`, `editorArgs`, `limits`, `subagents`, and `tui`. `tui.showThinking` defaults to `true`; `/settings thinking off` hides streamed reasoning from the display while retaining it in conversation history. Provider entries support the common transport/model options. The Capy entry requires `projectId` and may also contain `speed`, `buildModel`, `buildSpeed`, `repos`, and `tags`.
 
 A project configuration without secrets:
 
@@ -321,6 +366,9 @@ A project configuration without secrets:
   "temperature": 0.2,
   "maxTokens": 2000,
   "fallbackModels": ["gpt-4o"],
+  "tui": {
+    "showThinking": true
+  },
   "editor": "code",
   "editorArgs": ["--wait"],
   "limits": {
@@ -349,7 +397,7 @@ Use an alias with `-m fast` and a profile with `--profile review`. Profiles can 
 
 Run `kyokao themes` for compact previews. TUI themes are `kyokao-dark`, `kyokao-light`, `dracula`, `nord`, `solarized-dark`, `solarized-light`, `monokai`, and `high-contrast`. Code themes are `kyokao`, `dracula`, `nord`, `solarized-dark`, `solarized-light`, `monokai`, and `github-light`.
 
-Inside the workspace, `/theme` lists active and available names, `/theme dracula` changes the full TUI immediately, `/theme code github-light` changes Markdown/fenced code immediately, and `/theme save` atomically writes both active choices to global configuration while retaining unrelated settings. Theme switching is render-only: it is allowed during active work and does not rebuild the provider/backend, cancel work, reset Capy state, or alter the session/queue.
+Inside the workspace, themes live only under `/settings`; there is no separate `/theme` slash command. Choose **TUI theme** or **Code theme** to browse named options such as **Kyokao Dark**, **Solarized Light**, and **GitHub Light**. Selecting one changes the active theme immediately and atomically saves both theme IDs to global configuration while retaining unrelated settings. Theme switching is render-only: it does not rebuild the provider/backend, cancel work, reset Capy state, or alter the session/queue.
 
 Kyokao negotiates ANSI 16, 256-color, or truecolor from `TERM` and `COLORTERM`. `NO_COLOR` always disables color. Non-TTY output is plain unless the established `FORCE_COLOR` or `CLICOLOR_FORCE` convention explicitly enables color. Themes do not force a terminal background, so light themes remain legible on light terminals.
 
@@ -419,7 +467,77 @@ MCP tools are namespaced as `mcp_<server>_<tool>` before they reach the model. S
 
 `edit <path>` uses `editor`, then `VISUAL`, then `EDITOR`, and finally `vi` (or `notepad` on Windows). `editorArgs` are appended to the command; include `{file}` when the editor needs the file in a specific argument position, otherwise Kyokao appends it.
 
-At startup Kyokao loads instruction files from the workspace root in this order: `SOUL.md`, `CLAUDE.md`, `AGENTS.md`, `KYOKAO.md`, and `.kyokao/instructions.md` or `.kyokao/soul.md`. Case variants are accepted and duplicate names are loaded once. Their content is bounded before it is added to the system prompt, while the session transcript remains unchanged.
+At startup Kyokao loads instruction files from two locations. **Repository conventions** are read from the workspace root: `SOUL.md`, `CLAUDE.md`, `AGENTS.md`, `KYOKAO.md` (case-insensitive, loaded once per name). **User-level Kyokao instructions** are read from `~/.kyokao/instructions.md` and `~/.kyokao/soul.md`. Their content is bounded before it is added to the system prompt, while the session transcript remains unchanged.
+
+### Headless output formats
+
+`--output-format` selects how non-interactive runs render output. It is ignored in the TUI.
+
+| Format           | Behavior                                                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `plain`          | Human text via the renderer (the default when stdout is a TTY, or when piped for back-compat).                                           |
+| `streaming-json` | One NDJSON line per backend event as it arrives: `{kind, value, ts}` where `kind` is `assistant`, `tool`, `usage`, `status`, or `error`. |
+| `json`           | A single aggregated object emitted at the end: `{events, session, answer}`.                                                              |
+
+The default is `plain` in a TTY and `streaming-json` when piped, unless an explicit format is given (which always wins). Examples:
+
+```bash
+kyokao --output-format streaming-json "explain the repo" | jq 'select(.kind=="assistant")'
+echo "summarize this file" | kyokao --output-format json > result.json
+```
+
+### Sub-agents
+
+`--subagents` (or `subagents.enabled: true` in `~/.kyokao/config.json`) exposes a `spawn_subagent` tool the agent can call to delegate a scoped sub-task to a fresh, isolated agent session. Sub-agents are off by default because they spend tokens; opt in when the workflow benefits from focused exploration that would otherwise pollute the main transcript.
+
+- **Default grant is read-only:** `read_file`, `list_files`, `glob`, `grep`, `git`. The sub-agent cannot mutate the workspace unless the caller explicitly grants `write_file`, `apply_patch`, `shell`, or `http_get`.
+- **Budget isolation:** each spawn gets its own iteration cap (default 8) and a cost cap that is the smaller of the caller-provided `maxCostUsd` and the parent's remaining budget. A sub-agent can never overshoot the parent.
+- **Transcript isolation:** only the sub-agent's final assistant answer is returned to the parent. Its intermediate turns live in its own session.
+
+Example tool call the model might emit:
+
+```json
+{
+  "name": "spawn_subagent",
+  "arguments": {
+    "prompt": "Find every caller of the loadConfig function and report file:line for each.",
+    "maxIterations": 5
+  }
+}
+```
+
+### Agent Client protocol
+
+`kyokao agent-client` drives the agent over a JSON-RPC 2.0 over stdio NDJSON wire protocol designed for IDE and tool integration.
+
+**Transport:** one JSON object per line on stdin (requests) and stdout (responses + notifications). stderr is reserved for logs.
+
+**Client → server requests:**
+
+| Method           | Params                                 | Result                                            |
+| ---------------- | -------------------------------------- | ------------------------------------------------- |
+| `initialize`     | `{clientInfo?}`                        | `{protocolVersion, serverInfo, capabilities}`     |
+| `session/start`  | `{approvalPolicy?: "never"\|"client"}` | `{sessionId}`                                     |
+| `session/resume` | `{sessionId}`                          | `{sessionId}`                                     |
+| `turn/run`       | `{prompt}`                             | `{turnId}` (completion arrives via notifications) |
+| `turn/interrupt` | `{}`                                   | `{}`                                              |
+
+**Server → client notifications:** `turn/started`, `turn/completed` (with `status: completed | interrupted | failed`), and one `item/*` per backend event: `item/assistant`, `item/tool`, `item/toolResult`, `item/usage`, `item/status`, `item/error`.
+
+Example session:
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"kyokao-agent-client-1",...}}
+→ {"jsonrpc":"2.0","id":2,"method":"session/start","params":{}}
+← {"jsonrpc":"2.0","id":2,"result":{"sessionId":"..."}}
+→ {"jsonrpc":"2.0","id":3,"method":"turn/run","params":{"prompt":"explain the repo"}}
+← {"jsonrpc":"2.0","method":"turn/started","params":{"turnId":"..."}}
+← {"jsonrpc":"2.0","method":"item/assistant","params":{"turnId":"...","text":"Looking at..."}}
+← {"jsonrpc":"2.0","method":"item/tool","params":{"turnId":"...","text":"list_files {\"path\":\".\"}"}}
+← {"jsonrpc":"2.0","method":"item/toolResult","params":{"turnId":"...","text":"..."}}
+← {"jsonrpc":"2.0","method":"turn/completed","params":{"turnId":"...","status":"completed"}}
+```
 
 ## Approvals and safety
 
@@ -439,16 +557,18 @@ The `limits` object adds hard runtime ceilings: tool calls per run, shell timeou
 
 ## Sessions, memory, and workflows
 
-Each workspace stores state under `./.kyokao/`:
+All state lives under `~/.kyokao/` (global, not per-workspace):
 
-- `sessions/<uuid>.json` contains the task, timestamps, transcript, most recent checkpoint, context summary, and token/cost usage.
+- `sessions/<uuid>.json` contains the task, timestamps, transcript, most recent checkpoint, context summary, token/cost usage, and the workspace path the session was created in.
 - `memory.json` contains the manual string key/value store used by `memory` commands.
 
-List and resume sessions from the same workspace:
+Sessions are **global** — `kyokao session list` shows sessions from all workspaces. Each session records its origin workspace path (the `workspace` field) for future filtering.
+
+List and resume sessions:
 
 ```bash
-kyokao sessions
-kyokao resume 123e4567-e89b-12d3-a456-426614174000 "continue from the last checkpoint"
+kyokao session list
+kyokao session resume 123e4567-e89b-12d3-a456-426614174000 "continue from the last checkpoint"
 ```
 
 Sessions are saved after completed tool-call iterations and when a run completes. Once a request approaches the configured context budget, older transcript turns are replaced in the provider request by a bounded local summary while the full transcript remains on disk. Provider-reported usage is preferred; endpoints without usage fields receive a local token estimate. `Ctrl+C` aborts the active request; the CLI reports that the last completed tool checkpoint remains saved. The `memory` store is local data management only: this implementation does not automatically inject memory into agent prompts.
@@ -496,8 +616,8 @@ CI runs that gate on Node 20 and 22 across Ubuntu, macOS, and Windows.
 Push a tag matching the CLI package version to build a GitHub Release:
 
 ```bash
-git tag v0.5.5
-git push origin v0.5.5
+git tag v0.8.0
+git push origin v0.8.0
 ```
 
 The release workflow verifies the tag against `packages/cli/package.json`, runs the full test gate, and publishes self-contained Linux x64, macOS x64/ARM64, and Windows x64 archives with SHA-256 checksums. These binaries do not require Node.js on the target machine.
@@ -507,7 +627,7 @@ The release workflow verifies the tag against `packages/cli/package.json`, runs 
 ```bash
 pnpm build
 pnpm --filter kyokao pack
-TARBALL=kyokao-0.5.5.tgz
+TARBALL=kyokao-0.8.0.tgz
 PREFIX="$(mktemp -d)"
 npm install --prefix "$PREFIX" "$TARBALL"
 "$PREFIX/node_modules/.bin/kyokao" --help
@@ -519,7 +639,7 @@ Use the tarball filename output by `pack` if the version differs. PowerShell:
 ```powershell
 pnpm build
 pnpm --filter kyokao pack
-$tarball = '.\kyokao-0.5.5.tgz'
+$tarball = '.\kyokao-0.8.0.tgz'
 $prefix = Join-Path $env:TEMP ('kyokao-npm-' + [guid]::NewGuid())
 npm install --prefix $prefix $tarball
 & (Join-Path $prefix 'node_modules\.bin\kyokao.cmd') --help
@@ -554,17 +674,17 @@ Core tools are `read_file`, `list_files`, `glob`, `grep`, `write_file`, `apply_p
 
 ## Troubleshooting
 
-| Symptom                                                              | Check                                                                                                                                                                                                                               |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `credentials: missing` in `doctor` or provider authentication errors | Export the preset’s exact API-key variable from the provider table, or pass `--api-key` for this invocation. `doctor` reports presence, not validity.                                                                               |
-| `Provider baseURL is required`                                       | Select a built-in preset or configure/pass a custom provider `baseURL`. OpenAI-compatible endpoints normally need the `/v1` path because Kyokao appends `/chat/completions` and `/models`.                                          |
-| `Model listing failed: ...`                                          | `models` calls the selected server’s `/models`; verify credentials, URL, and whether the server implements that endpoint. You can still supply a model string directly because the CLI does not require a successful model listing. |
-| Local Ollama, LM Studio, or vLLM connection fails                    | Start the local server, confirm its port (`11434`, `1234`, or `8000` for the presets), verify its OpenAI-compatible `/v1` endpoint, and use the model ID it has loaded/serves.                                                      |
-| `Invalid config ...`                                                 | Ensure JSON is valid; top-level sections are objects, provider fields and aliases are strings, approval is one of the three modes, and `maxIterations` is an integer 1–100.                                                         |
-| `Unknown provider: ...`                                              | Use `kyokao providers` for presets, or add a matching name under `providers` in config.                                                                                                                                             |
-| A request is denied unexpectedly                                     | In `suggest`, every mutation and shell command needs a TTY confirmation. In `auto-edit`, shell still needs confirmation. Piped/non-TTY input denies prompted actions.                                                               |
-| Windows shell behavior differs                                       | Shell tool calls use `cmd.exe` (or `ComSpec`) on Windows and `/bin/sh` elsewhere. Use PowerShell only for your own invocation/setup commands; agent shell commands are not PowerShell commands by default.                          |
-| A run was interrupted                                                | Run `kyokao sessions`, then `kyokao resume <id> "..."` from the same workspace. Only the last completed checkpoint is guaranteed to have been saved.                                                                                |
+| Symptom                                                              | Check                                                                                                                                                                                                                                                                 |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `credentials: missing` in `doctor` or provider authentication errors | Export the preset’s exact API-key variable from the provider table, or pass `--api-key` for this invocation. `doctor` reports presence, not validity.                                                                                                                 |
+| `Provider baseURL is required`                                       | Select a built-in preset or configure/pass a custom provider `baseURL`. OpenAI-compatible endpoints normally need the `/v1` path because Kyokao appends `/chat/completions` and `/models`.                                                                            |
+| `Model listing failed: ...`                                          | Kyokao validates the selected model through the server’s `/models` endpoint and caches successful listings briefly to avoid duplicate startup calls. Verify credentials, URL, and endpoint support, or use `--skip-model-check` when the endpoint cannot list models. |
+| Local Ollama, LM Studio, or vLLM connection fails                    | Start the local server, confirm its port (`11434`, `1234`, or `8000` for the presets), verify its OpenAI-compatible `/v1` endpoint, and use the model ID it has loaded/serves.                                                                                        |
+| `Invalid config ...`                                                 | Ensure JSON is valid; top-level sections are objects, provider fields and aliases are strings, approval is one of the three modes, and `maxIterations` is an integer 1–100.                                                                                           |
+| `Unknown provider: ...`                                              | Use `kyokao providers` for presets, or add a matching name under `providers` in config.                                                                                                                                                                               |
+| A request is denied unexpectedly                                     | In `suggest`, every mutation and shell command needs a TTY confirmation. In `auto-edit`, shell still needs confirmation. Piped/non-TTY input denies prompted actions.                                                                                                 |
+| Windows shell behavior differs                                       | Shell tool calls use `cmd.exe` (or `ComSpec`) on Windows and `/bin/sh` elsewhere. Use PowerShell only for your own invocation/setup commands; agent shell commands are not PowerShell commands by default.                                                            |
+| A run was interrupted                                                | Run `kyokao sessions`, then `kyokao resume <id> "..."` from the same workspace. Only the last completed checkpoint is guaranteed to have been saved.                                                                                                                  |
 
 ## Contributing and license
 
