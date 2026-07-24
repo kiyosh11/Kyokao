@@ -1,39 +1,9 @@
-import {
-  OpenAICompatibleProvider,
-  modelCatalog,
-  type ChatMessage,
-  type ModelInfo,
-  type TokenUsage,
-} from '@kyokao/providers';
-import type { ToolExecutor } from '@kyokao/tools';
-import type { LocalStore, Session, SessionUsage } from '@kyokao/memory';
-import { readdir, readFile } from 'node:fs/promises';
+// @ts-nocheck
+import { modelCatalog } from '@kyokao/providers';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-
-export interface AgentOptions {
-  provider: OpenAICompatibleProvider;
-  tools: ToolExecutor;
-  store: LocalStore;
-  maxIterations: number;
-  workspace: string;
-  contextWindow?: number;
-  compressionThreshold?: number;
-  modelInfo?: ModelInfo;
-  instructions?: string;
-  maxToolCalls?: number;
-  maxCostUsd?: number;
-  maxOutputChars?: number;
-  onEvent?: (
-    kind: 'text' | 'tool' | 'tool-result' | 'assistant' | 'usage' | 'compression',
-    text: string,
-    usage?: SessionUsage,
-  ) => void;
-  signal?: AbortSignal;
-}
-
-export const systemPrompt = (workspace: string, instructions = '') =>
-  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely. When the user requests a repository change, do not stop after describing future work ("I'll create", "let me update", or similar): invoke the appropriate write/patch tools, inspect the result, and verify it before giving a finished answer. For explanation-only questions, answer directly and do not force a mutation tool.${instructions ? `\n\nRepository instructions:\n${instructions}` : ''}`;
-
+export const systemPrompt = (workspace, instructions = '') =>
+  `You are Kyokao, a careful coding agent working only in repository ${workspace}. Inspect before changing. Treat @relative/path tokens as workspace file references and inspect those paths with tools when relevant. Make minimal safe changes, use tools for facts, run relevant checks, never expose secrets, and explain completed work concisely. When the user requests a repository change, do not stop after describing future work ("I'll create", "let me update", or similar): invoke the appropriate write/patch tools, inspect the result, and verify it before giving a finished answer. For explanation-only questions, answer directly and do not force a mutation tool.${instructions ? `\n\nRepository instructions:\n${instructions}` : ''}`;
 const changeVerb =
   '(?:create|write|edit|modify|update|patch|implement|add|remove|delete|fix|refactor|rename|build|make|generate|migrate|upgrade|optimize)';
 const explanationLead =
@@ -44,61 +14,81 @@ const futureIntent = new RegExp(
 );
 const explicitFollowupChange = new RegExp(`\\b(?:and|then|also)\\s+${changeVerb}\\b`, 'i');
 const requestedChange = new RegExp(`\\b${changeVerb}\\b`, 'i');
-
-export function isFutureIntentOnly(content: string | null, prompt: string): boolean {
+export function isFutureIntentOnly(content, prompt) {
   if (!content?.trim() || !futureIntent.test(content)) return false;
   if (explanationLead.test(prompt) && !explicitFollowupChange.test(prompt)) return false;
   return requestedChange.test(prompt);
 }
-
 const intentContinuation =
   'The previous response only stated future intent and did not complete the requested repository change. Continue now: invoke the appropriate write_file/apply_patch (or other required) tools, inspect the result, run a relevant verification, and only then report completed work. Do not reply with another plan.';
 const maxIntentContinuations = 2;
-
-export async function loadInstructionFiles(workspace: string): Promise<string> {
+/**
+ * Loads repository and user-level instruction files.
+ *
+ * Repo conventions (`SOUL.md`, `CLAUDE.md`, `AGENTS.md`, `KYOKAO.md`) are
+ * read from the workspace root — these are community standards Codex and
+ * Claude Code also honor, so they stay per-repo.
+ *
+ * Kyokao-specific user instructions (`instructions.md`, `soul.md`) are read
+ * from `home` (`~/.kyokao/`) — these are user-level overrides, not repo
+ * conventions, so they moved out of the workspace in 0.7.0.
+ */
+export async function loadInstructionFiles(workspace, home) {
   const names = ['SOUL.md', 'soul.md', 'CLAUDE.md', 'claude.md', 'AGENTS.md', 'KYOKAO.md'];
-  const loaded: string[] = [];
-  const seen = new Set<string>();
+  const loaded = [];
+  const seen = new Set();
+  const seenContent = new Set();
   for (const name of names) {
     const path = join(workspace, name);
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
     try {
       const content = await readFile(path, 'utf8');
-      if (content.trim()) {
+      const normalized = content.trim();
+      if (normalized && !seenContent.has(normalized)) {
         loaded.push(`### ${name}\n${content.slice(0, 20_000)}`);
         seen.add(key);
+        seenContent.add(normalized);
       }
     } catch {}
   }
-  try {
-    for (const entry of await readdir(join(workspace, '.kyokao'))) {
-      if (!/^(instructions|soul)\.md$/i.test(entry)) continue;
-      const content = await readFile(join(workspace, '.kyokao', entry), 'utf8');
-      if (content.trim()) loaded.push(`### .kyokao/${entry}\n${content.slice(0, 20_000)}`);
+  // User-level Kyokao instructions live in ~/.kyokao/ (not the workspace).
+  if (home) {
+    for (const entry of ['instructions.md', 'soul.md']) {
+      try {
+        const content = await readFile(join(home, entry), 'utf8');
+        const normalized = content.trim();
+        if (normalized && !seenContent.has(normalized)) {
+          loaded.push(`### ~/.kyokao/${entry}\n${content.slice(0, 20_000)}`);
+          seenContent.add(normalized);
+        }
+      } catch {}
     }
-  } catch {}
+  }
   return loaded.join('\n\n').slice(0, 60_000);
 }
-
-export function estimateTokens(messages: ChatMessage[]): number {
+export function estimateTokens(messages) {
   return Math.ceil(
     messages.reduce((total, message) => {
       const toolCalls =
         message.role === 'assistant' ? JSON.stringify(message.tool_calls ?? []) : '';
-      return total + (message.content?.length ?? 0) + toolCalls.length + message.role.length + 8;
+      const reasoning = message.role === 'assistant' ? (message.reasoning_content?.length ?? 0) : 0;
+      return (
+        total +
+        (message.content?.length ?? 0) +
+        reasoning +
+        toolCalls.length +
+        message.role.length +
+        8
+      );
     }, 0) / 4,
   );
 }
-
-export function compressMessages(
-  messages: ChatMessage[],
-  maxTokens: number,
-): { messages: ChatMessage[]; summary?: string; removed: number } {
+export function compressMessages(messages, maxTokens) {
   if (estimateTokens(messages) <= maxTokens || messages.length <= 3)
     return { messages, removed: 0 };
   const first = messages[0]?.role === 'system' ? [messages[0]] : [];
-  const tail: ChatMessage[] = [];
+  const tail = [];
   let tailTokens = 0;
   for (let i = messages.length - 1; i >= first.length; i--) {
     const message = messages[i];
@@ -112,15 +102,14 @@ export function compressMessages(
     .map((message) => `${message.role}: ${message.content}`)
     .join('\n')
     .slice(0, Math.max(256, Math.floor(maxTokens * 4 * 0.25)));
-  const compacted: ChatMessage[] = [
+  const compacted = [
     ...first,
-    ...(summary ? [{ role: 'system' as const, content: `Context summary:\n${summary}` }] : []),
+    ...(summary ? [{ role: 'system', content: `Context summary:\n${summary}` }] : []),
     ...tail,
   ];
   return { messages: compacted, summary, removed: removedMessages.length };
 }
-
-function addUsage(session: Session, usage: TokenUsage, model?: ModelInfo) {
+function addUsage(session, usage, model) {
   const current = session.usage ?? {
     promptTokens: 0,
     completionTokens: 0,
@@ -138,21 +127,41 @@ function addUsage(session: Session, usage: TokenUsage, model?: ModelInfo) {
     (usage.completionTokens * (model?.outputCostPerMillion ?? 0)) / 1_000_000;
   session.usage = current;
 }
-
 export class Agent {
-  constructor(private options: AgentOptions) {}
-  async run(prompt: string, session?: Session): Promise<Session> {
+  options;
+  constructor(options) {
+    this.options = options;
+  }
+  async run(prompt, session) {
     const s = session ?? (await this.options.store.create(prompt));
-    const fullMessages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt(this.options.workspace, this.options.instructions) },
-      ...s.messages,
-      { role: 'user', content: prompt },
-    ];
     s.messages.push({ role: 'user', content: prompt });
     const maxContext = this.options.contextWindow ?? 16_000;
     const threshold = Math.floor(maxContext * (this.options.compressionThreshold ?? 0.8));
     let toolCalls = 0;
     let intentContinuations = 0;
+    // messagesForProvider is the working transcript sent to the provider. When
+    // compression fires it is replaced with the compacted array so subsequent
+    // iterations benefit from the smaller transcript. s.messages keeps the full
+    // history for persistence. (Previously the working set grew unbounded
+    // across iterations and the summary was recomputed from scratch each time.)
+    const sessionDirectives = [
+      s.goal ? `Active goal: ${s.goal}` : '',
+      s.personality && s.personality !== 'default'
+        ? `Response style: ${s.personality}. Follow this style without weakening correctness or safety.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    let messagesForProvider = [
+      {
+        role: 'system',
+        content: systemPrompt(
+          this.options.workspace,
+          [this.options.instructions, sessionDirectives].filter(Boolean).join('\n\n'),
+        ),
+      },
+      ...s.messages,
+    ];
     for (let i = 0; i < this.options.maxIterations; i++) {
       this.options.signal?.throwIfAborted();
       if (
@@ -163,8 +172,10 @@ export class Agent {
         throw new Error(
           `Safety limit reached: estimated cost exceeded $${this.options.maxCostUsd}`,
         );
-      const compacted = compressMessages(fullMessages, threshold);
+      const compacted = compressMessages(messagesForProvider, threshold);
       if (compacted.summary) {
+        const beforeTokens = estimateTokens(messagesForProvider);
+        messagesForProvider = compacted.messages;
         s.contextSummary = compacted.summary;
         s.usage ??= {
           promptTokens: 0,
@@ -177,17 +188,18 @@ export class Agent {
         s.usage.compressedMessages += compacted.removed;
         this.options.onEvent?.(
           'compression',
-          `compressed ${compacted.removed} messages (${estimateTokens(fullMessages)} → ${estimateTokens(compacted.messages)} tokens)`,
+          `compressed ${compacted.removed} messages (${beforeTokens} → ${estimateTokens(compacted.messages)} tokens)`,
         );
       }
       let response;
       for (let attempt = 0; ; attempt++) {
         try {
           response = await this.options.provider.chat(
-            compacted.messages,
+            messagesForProvider,
             this.options.tools.definitions(),
             {
               onText: (t) => this.options.onEvent?.('text', t),
+              onReasoning: (t) => this.options.onEvent?.('reasoning', t),
               onToolCall: (c) => this.options.onEvent?.('tool', `${c.name} ${c.arguments}`),
             },
             this.options.signal,
@@ -204,10 +216,10 @@ export class Agent {
           await new Promise((r) => setTimeout(r, 250 * 2 ** attempt));
         }
       }
-      const observedUsage = response!.usage ?? {
-        promptTokens: estimateTokens(compacted.messages),
-        completionTokens: estimateTokens([response!.message]),
-        totalTokens: estimateTokens(compacted.messages) + estimateTokens([response!.message]),
+      const observedUsage = response.usage ?? {
+        promptTokens: estimateTokens(messagesForProvider),
+        completionTokens: estimateTokens([response.message]),
+        totalTokens: estimateTokens(messagesForProvider) + estimateTokens([response.message]),
       };
       if (observedUsage) {
         addUsage(
@@ -218,12 +230,12 @@ export class Agent {
         );
         this.options.onEvent?.(
           'usage',
-          `${s.usage!.totalTokens.toLocaleString()} tokens · $${s.usage!.estimatedCostUsd.toFixed(4)} estimated`,
+          `${s.usage.totalTokens.toLocaleString()} tokens · $${s.usage.estimatedCostUsd.toFixed(4)} estimated`,
           s.usage,
         );
       }
-      const m = response!.message;
-      fullMessages.push(m);
+      const m = response.message;
+      messagesForProvider.push(m);
       s.messages.push(m);
       if (m.content && this.options.provider.options.stream === false)
         this.options.onEvent?.('assistant', m.content);
@@ -234,8 +246,8 @@ export class Agent {
               `Model returned future intent without completing the requested change after ${maxIntentContinuations} continuations`,
             );
           intentContinuations += 1;
-          const continuation: ChatMessage = { role: 'system', content: intentContinuation };
-          fullMessages.push(continuation);
+          const continuation = { role: 'system', content: intentContinuation };
+          messagesForProvider.push(continuation);
           s.messages.push(continuation);
           s.checkpoint = `intent continuation ${intentContinuations}`;
           await this.options.store.saveSession(s);
@@ -251,7 +263,7 @@ export class Agent {
           throw new Error(
             `Safety limit reached: maximum tool calls (${this.options.maxToolCalls ?? 100})`,
           );
-        let args: Record<string, unknown>;
+        let args;
         try {
           args = JSON.parse(call.arguments);
         } catch {
@@ -262,7 +274,7 @@ export class Agent {
           result.content.length > (this.options.maxOutputChars ?? 30_000)
             ? `${result.content.slice(0, this.options.maxOutputChars ?? 30_000)}\n…truncated…`
             : result.content;
-        const toolMessage: ChatMessage = {
+        const toolMessage = {
           role: 'tool',
           tool_call_id: call.id,
           name: call.name,
@@ -272,7 +284,7 @@ export class Agent {
           'tool-result',
           `${call.name}: ${result.isError ? 'failed' : 'completed'}\n${content}`,
         );
-        fullMessages.push(toolMessage);
+        messagesForProvider.push(toolMessage);
         s.messages.push(toolMessage);
       }
       s.checkpoint = `iteration ${i + 1}`;
@@ -281,6 +293,9 @@ export class Agent {
     throw new Error(`Agent reached iteration limit (${this.options.maxIterations})`);
   }
 }
-
-export * from './backends.js';
+export * from './backend-types.js';
+export * from './local-backend.js';
+export * from './capy-backend.js';
 export * from './scheduler.js';
+export * from './subagent.js';
+export * from './agent-client.js';

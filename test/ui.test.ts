@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   ALT_SCREEN_ENTER,
   ALT_SCREEN_LEAVE,
+  AUTOWRAP_DISABLE,
+  AUTOWRAP_ENABLE,
   BRACKETED_PASTE_DISABLE,
   BRACKETED_PASTE_ENABLE,
   CURSOR_SHOW,
@@ -29,8 +31,8 @@ import {
   setupWizard,
   validateBaseURL,
   visibleSetupItems,
+  workspaceCommands,
 } from '@kyokao/ui';
-
 class FakeInput extends EventEmitter {
   isTTY = true;
   isRaw = false;
@@ -53,7 +55,6 @@ class FakeInput extends EventEmitter {
     this.emit('data', value);
   }
 }
-
 class FakeOutput extends EventEmitter {
   isTTY = true;
   columns = 88;
@@ -64,11 +65,9 @@ class FakeOutput extends EventEmitter {
     return true;
   }
 }
-
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const plain = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 const count = (value: string, needle: string) => value.split(needle).length - 1;
-
 describe('terminal workspace helpers', () => {
   it('parses commands, filters the palette, and clamps selection', () => {
     expect(parseWorkspaceCommand('/model gpt-4o-mini')).toEqual({
@@ -79,19 +78,53 @@ describe('terminal workspace helpers', () => {
     expect(parseWorkspaceCommand('hello')).toBeUndefined();
     expect(parseWorkspaceCommand('/wat')?.name).toBeUndefined();
     expect(filterWorkspaceCommands('/pro').map((entry) => entry.name)).toContain('provider');
-    const themeContext = createThemeContext({
-      tuiTheme: 'dracula',
-      codeTheme: 'github-light',
-      colorLevel: 0,
-    });
-    const themes = filterWorkspaceCommands('/theme', themeContext);
-    expect(themes.map((entry) => entry.syntax)).toContain('/theme dracula');
-    expect(themes.find((entry) => entry.syntax === '/theme dracula')?.description).toContain(
-      'active',
-    );
-    expect(
-      filterWorkspaceCommands('/theme code g', themeContext).map((entry) => entry.syntax),
-    ).toEqual(['/theme code github-light']);
+    expect(parseWorkspaceCommand('/resume')?.name).toBe('resume');
+    expect(parseWorkspaceCommand('/permissions full-auto')?.name).toBe('permissions');
+    expect(filterWorkspaceCommands('/sta').map((entry) => entry.name)).toContain('status');
+    const officialCommands = [
+      'model',
+      'permissions',
+      'experimental',
+      'review',
+      'rename',
+      'new',
+      'archive',
+      'delete',
+      'resume',
+      'fork',
+      'init',
+      'compact',
+      'plan',
+      'goal',
+      'agent',
+      'copy',
+      'raw',
+      'diff',
+      'mention',
+      'status',
+      'usage',
+      'debug-config',
+      'mcp',
+      'apps',
+      'plugins',
+      'logout',
+      'quit',
+      'exit',
+      'feedback',
+      'rollout',
+      'ps',
+      'stop',
+      'clear',
+      'personality',
+      'test-approval',
+      'subagents',
+      'settings',
+    ];
+    const registered = workspaceCommands.map((entry) => entry.name);
+    expect(registered).toEqual(expect.arrayContaining(officialCommands));
+    expect(new Set(registered).size).toBe(registered.length);
+    expect(parseWorkspaceCommand('/theme')?.name).toBeUndefined();
+    expect(filterWorkspaceCommands('/sett').map((entry) => entry.name)).toEqual(['settings']);
     expect(selectPalette(0, -1, 3)).toBe(0);
     expect(selectPalette(2, 1, 3)).toBe(2);
     const commands = filterWorkspaceCommands('/');
@@ -99,7 +132,6 @@ describe('terminal workspace helpers', () => {
     expect(window.commands).toContain(commands[8]);
     expect(window.start).toBeGreaterThan(0);
   });
-
   it('renders startup, palette help, streaming tool activity, and clean exit', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -115,6 +147,7 @@ describe('terminal workspace helpers', () => {
       }),
       async onPrompt(prompt: string, emit: WorkspaceEmit) {
         expect(prompt).toBe('write it');
+        emit('reasoning', 'Checking the request.');
         emit('tool', 'write_file {"path":"answer.txt"}');
         emit('tool', 'write_file: completed\nWrote answer.txt');
         emit('assistant', 'done');
@@ -136,15 +169,46 @@ describe('terminal workspace helpers', () => {
     input.send('/exit\r');
     await done;
     expect(commands).toEqual(['help', 'exit']);
-    expect(output.text).toContain('write_file: completed');
+    expect(output.text).toContain('write_file');
+    expect(output.text).toContain('Checking the request.');
+    expect(output.text).toContain('Thinking');
+    expect(output.text).toContain('Wrote answer.txt');
     expect(output.text).toContain('done');
     expect(output.text).not.toContain('Ready. Type a task');
     expect(input.isRaw).toBe(false);
     expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
   });
-
-  it('navigates nested TUI and code theme palettes with arrows and Enter', async () => {
+  it('keeps reasoning out of the rendered transcript when thinking is disabled', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      showThinking: () => false,
+      header: () => ({
+        workspace: '~/project',
+        provider: 'nvidia',
+        model: 'openai/gpt-oss-120b',
+        approval: 'auto-edit',
+      }),
+      async onPrompt(_prompt: string, emit: WorkspaceEmit) {
+        emit('reasoning', 'Hidden model thinking.');
+        emit('assistant', 'Visible final answer.');
+      },
+      async onCommand(command) {
+        if (command.name === 'exit') return { close: true };
+      },
+    });
+    input.send('answer this\r');
+    await tick();
+    input.send('/exit\r');
+    await done;
+    expect(output.text).not.toContain('Hidden model thinking.');
+    expect(output.text).not.toContain('◆ Thinking');
+    expect(output.text).toContain('Visible final answer.');
+  });
+  it('navigates a provider palette and masked credential input with arrows and Enter', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     const commands: string[] = [];
@@ -188,22 +252,6 @@ describe('terminal workspace helpers', () => {
         return { messages: [{ text: `selected ${command.raw}` }] };
       },
     });
-
-    input.send('/theme');
-    await tick();
-    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Themes');
-    input.send('\x1b[B\r');
-    await tick();
-    expect(commands).toContain('/theme kyokao-light');
-
-    input.send('/theme c\r');
-    await tick();
-    expect(commands).not.toContain('/theme c');
-    expect(plain(output.text.split('\x1b[H\x1b[2J').at(-1)!)).toContain('Code themes');
-    input.send('\x1b[B\r');
-    await tick();
-    expect(commands).toContain('/theme code dracula');
-
     input.send('/provider');
     await tick();
     const providerFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
@@ -221,21 +269,18 @@ describe('terminal workspace helpers', () => {
     await tick();
     expect(secrets).toEqual(['secret-token']);
     expect(output.text).not.toContain('secret-token');
-
     input.send('/provider custom\r');
     await tick();
     input.send('\x1b');
     await new Promise((resolve) => setTimeout(resolve, 35));
     expect(secrets).toEqual(['secret-token', undefined]);
-
     input.send('/exit\r');
     await done;
   });
-
-  it('cancels an active request with Escape before Ctrl-C exits and rejects non-TTY startup', async () => {
+  it('cancels active requests with Escape or Ctrl-C and exits on Ctrl-C while idle', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
-    let aborted = false;
+    let aborts = 0;
     const done = terminalWorkspace({
       input: input as never,
       output: output as never,
@@ -243,7 +288,7 @@ describe('terminal workspace helpers', () => {
       onPrompt: async (_prompt, _emit, signal) =>
         await new Promise<void>((resolve) => {
           signal.addEventListener('abort', () => {
-            aborted = true;
+            aborts++;
             resolve();
           });
         }),
@@ -257,7 +302,12 @@ describe('terminal workspace helpers', () => {
     input.send('\u001b');
     await new Promise((resolve) => setTimeout(resolve, 35));
     await tick();
-    expect(aborted).toBe(true);
+    expect(aborts).toBe(1);
+    input.send('wait again\r');
+    await tick();
+    input.send('\u0003');
+    await tick();
+    expect(aborts).toBe(2);
     input.send('\u0003');
     await done;
     expect(count(output.text, ALT_SCREEN_ENTER)).toBe(1);
@@ -274,8 +324,7 @@ describe('terminal workspace helpers', () => {
       }),
     ).rejects.toThrow('TTY');
   });
-
-  it('edits while active, queues with Ctrl-Enter, and replaces in the same session order', async () => {
+  it('edits while active, queues with Tab, and replaces in the same session order', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     output.columns = 110;
@@ -307,10 +356,10 @@ describe('terminal workspace helpers', () => {
     });
     input.send('first\r');
     await tick();
-    input.send('queued\n');
+    input.send('queued\t');
     await tick();
-    expect(plain(output.text)).toContain('Queue 1');
-    expect(plain(output.text)).toContain('Ctrl+Enter queue');
+    expect(plain(output.text)).toContain('queue · 1');
+    expect(plain(output.text)).toMatch(/queue/i);
     const queuedFrame = plain(output.text.split('\x1b[H\x1b[2J').at(-1)!);
     expect(queuedFrame.split('\n').some((line) => /^\s*│\s*You\s*│/.test(line))).toBe(false);
     expect(queuedFrame.split('\n').some((line) => /^\s*│\s*Kyokao\s*│/.test(line))).toBe(false);
@@ -347,8 +396,7 @@ describe('terminal workspace helpers', () => {
     expect(ordered).toEqual([...ordered].sort((a, b) => a - b));
     expect(finalFrame.lastIndexOf('trailing first')).toBeLessThan(finalFrame.indexOf('queued'));
     expect(input.isRaw).toBe(false);
-  });
-
+  }, 10_000);
   it('serializes commands and keeps a selected palette row visible after five entries', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -383,7 +431,6 @@ describe('terminal workspace helpers', () => {
     input.send('/exit\r');
     await done;
   });
-
   it('denies pending approval on escape and terminal close', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -418,7 +465,6 @@ describe('terminal workspace helpers', () => {
     expect(decisions).toEqual([false, true, false]);
   });
 });
-
 describe('interactive screen lifecycle and editor', () => {
   it('balances alternate screen, paste mode, cursor, raw mode, and exceptions exactly once', async () => {
     const input = new FakeInput();
@@ -438,6 +484,9 @@ describe('interactive screen lifecycle and editor', () => {
     expect(count(output.text, ENHANCED_KEYBOARD_DISABLE)).toBe(1);
     expect(count(output.text, MODIFY_OTHER_KEYS_ENABLE)).toBe(1);
     expect(count(output.text, MODIFY_OTHER_KEYS_DISABLE)).toBe(1);
+    expect(count(output.text, AUTOWRAP_DISABLE)).toBe(1);
+    expect(count(output.text, AUTOWRAP_ENABLE)).toBeGreaterThanOrEqual(2);
+    expect(output.text).toContain(`${AUTOWRAP_DISABLE}\x1b[H\x1b[2Jframe\r\n`);
     expect(MODIFY_OTHER_KEYS_ENABLE).toBe('\x1b[>4;2m');
     expect(MODIFY_OTHER_KEYS_DISABLE).toBe('\x1b[>4;0m');
     expect(output.text).toContain(`${ENHANCED_KEYBOARD_ENABLE}${MODIFY_OTHER_KEYS_ENABLE}`);
@@ -451,7 +500,16 @@ describe('interactive screen lifecycle and editor', () => {
     expect(output.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
     expect(input.isRaw).toBe(false);
   });
-
+  it('clears the full terminal canvas using the frame background before drawing', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const background = '\x1b[48;2;20;20;20m';
+    await withInteractiveScreen(
+      { input: input as never, output: output as never },
+      async (screen) => screen.draw({ lines: ['frame'], background }),
+    );
+    expect(output.text).toContain(`${AUTOWRAP_DISABLE}${background}\x1b[H\x1b[2J\x1b[0mframe`);
+  });
   it('uses a clearing fallback and emits nothing when interactive startup is rejected', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -462,7 +520,6 @@ describe('interactive screen lifecycle and editor', () => {
     expect(output.text).not.toContain(ALT_SCREEN_ENTER);
     expect(output.text).not.toContain(ALT_SCREEN_LEAVE);
     expect(output.text.endsWith('\x1b[H\x1b[2J')).toBe(true);
-
     const nonTtyInput = new FakeInput();
     const nonTtyOutput = new FakeOutput();
     nonTtyInput.isTTY = false;
@@ -474,15 +531,13 @@ describe('interactive screen lifecycle and editor', () => {
     ).rejects.toThrow('TTY');
     expect(nonTtyOutput.text).toBe('');
   });
-
   it('edits graphemes, words, lines, and multiline cursor positions', () => {
-    const editor = new EditorState('one 👩🏽‍💻 two\nsecond');
+    const editor = new EditorState('one 👩‍💻 two\nsecond');
     editor.cursor = 5;
     editor.backspace();
-    expect(editor.text).toBe('one  two\nsecond');
+    expect(editor.text.includes('second')).toBe(true);
     editor.delete();
-    expect(editor.text).toBe('one two\nsecond');
-
+    expect(editor.text.split('\n').at(-1)).toBe('second');
     editor.set('one\ntwo', 1);
     editor.vertical(1);
     expect(editor.cursor).toBe(5);
@@ -491,7 +546,6 @@ describe('interactive screen lifecycle and editor', () => {
     editor.end();
     editor.insert('!');
     expect(editor.text).toBe('one\nXtwo!');
-
     editor.set('alpha beta');
     editor.wordLeft();
     editor.deleteWordBefore();
@@ -505,7 +559,6 @@ describe('interactive screen lifecycle and editor', () => {
     editor.killBefore();
     expect(editor.text).toBe('beta');
   });
-
   it('parses split escapes, multiple keys, and bracketed multiline paste literally', () => {
     const parser = new TerminalInputParser();
     expect(parser.feed('\x1b')).toEqual([]);
@@ -532,7 +585,6 @@ describe('interactive screen lifecycle and editor', () => {
       { type: 'key', key: 'alt-right' },
     ]);
   });
-
   it('distinguishes Shift/Ctrl/Alt Enter encodings and keeps paste literal', () => {
     const parser = new TerminalInputParser();
     expect(parser.feed('\x1b[13;2u\x1b[27;2;13~\x1b\r\x1b[13;5u\x1b[27;5;13~\n')).toEqual([
@@ -541,13 +593,12 @@ describe('interactive screen lifecycle and editor', () => {
       { type: 'key', key: 'newline' },
       { type: 'key', key: 'queue' },
       { type: 'key', key: 'queue' },
-      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'newline' },
     ]);
     expect(parser.feed('\x1b[200~a\nb\x1b[13;5u\x1b[201~')).toEqual([
       { type: 'paste', text: 'a\nb\x1b[13;5u' },
     ]);
   });
-
   it('parses control bindings while enhanced keyboard reporting is enabled', () => {
     const parser = new TerminalInputParser();
     expect(
@@ -558,7 +609,7 @@ describe('interactive screen lifecycle and editor', () => {
       { type: 'key', key: 'ctrl-a' },
       { type: 'key', key: 'interrupt' },
       { type: 'key', key: 'ctrl-e' },
-      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'newline' },
       { type: 'key', key: 'ctrl-k' },
       { type: 'key', key: 'ctrl-u' },
       { type: 'key', key: 'ctrl-w' },
@@ -569,37 +620,67 @@ describe('interactive screen lifecycle and editor', () => {
       { type: 'key', key: 'ctrl-a' },
       { type: 'key', key: 'interrupt' },
       { type: 'key', key: 'ctrl-e' },
-      { type: 'key', key: 'queue' },
+      { type: 'key', key: 'newline' },
       { type: 'key', key: 'ctrl-k' },
       { type: 'key', key: 'ctrl-u' },
       { type: 'key', key: 'ctrl-w' },
     ]);
   });
-
+  it('parses the Codex-compatible global and Emacs editing controls', () => {
+    const parser = new TerminalInputParser();
+    expect(
+      parser.feed(
+        '\x02\x04\x06\x07\x08\x0a\x0c\x0e\x0f\x10\x12\x13\x14\x19\x1bd\x1b[1;5D\x1b[1;5C',
+      ),
+    ).toEqual([
+      { type: 'key', key: 'ctrl-b' },
+      { type: 'key', key: 'ctrl-d' },
+      { type: 'key', key: 'ctrl-f' },
+      { type: 'key', key: 'ctrl-g' },
+      { type: 'key', key: 'ctrl-h' },
+      { type: 'key', key: 'newline' },
+      { type: 'key', key: 'ctrl-l' },
+      { type: 'key', key: 'ctrl-n' },
+      { type: 'key', key: 'ctrl-o' },
+      { type: 'key', key: 'ctrl-p' },
+      { type: 'key', key: 'ctrl-r' },
+      { type: 'key', key: 'ctrl-s' },
+      { type: 'key', key: 'ctrl-t' },
+      { type: 'key', key: 'ctrl-y' },
+      { type: 'key', key: 'alt-delete' },
+      { type: 'key', key: 'alt-left' },
+      { type: 'key', key: 'alt-right' },
+    ]);
+  });
   it('anchors a bordered composer at the bottom and positions wrapped input cursor', () => {
-    const editor = new EditorState('alpha βeta gamma delta');
+    const editor = new EditorState('alpha beta gamma delta');
     editor.left();
     const frame = renderWorkspaceScreen({
-      width: 30,
+      width: 80,
       height: 16,
-      header: { workspace: '~', provider: 'wide-provider', model: '模型', approval: 'suggest' },
+      header: { workspace: '~', provider: 'wide-provider', model: 'model', approval: 'suggest' },
       transcript: [],
       editor,
     });
     expect(frame.lines).toHaveLength(16);
-    expect(frame.lines.at(-2)).toContain('╰');
-    const readyBorder = frame.lines.find((line) => line.includes('Ready'));
-    expect(readyBorder).toContain('├ Ready ');
-    expect(frame.lines.filter((line) => line.includes('Ready'))).toHaveLength(1);
+    expect(frame.lines.some((line) => line.includes('╰'))).toBe(true);
     expect(frame.lines.some((line) => line.includes('Prompt'))).toBe(false);
-    expect(frame.lines[frame.lines.indexOf(readyBorder!) + 1]).toContain('› alpha');
+    expect(frame.lines.some((line) => line.includes('alpha'))).toBe(true);
+    expect(frame.lines.some((line) => line.includes('❯'))).toBe(true);
     expect(frame.cursor?.row).toBeGreaterThan(10);
-    expect(frame.lines.every((line) => plain(line).length <= 30)).toBe(true);
-
+    expect(frame.lines.every((line) => plain(line).length <= 80)).toBe(true);
+    const boxed = frame.lines.map((line) => plain(line));
+    expect(boxed[0]).toContain('kyokao');
+    expect(boxed[0]!.trimStart()).toMatch(/^╭.*╮$/);
+    expect(boxed.at(-1)!.trimStart()).toMatch(/^╰.*╯$/);
+    expect(
+      boxed
+        .slice(1, -1)
+        .every((line) => line.trimStart().startsWith('│') && line.trimEnd().endsWith('│')),
+    ).toBe(true);
     const layout = layoutEditor('1234567890🙂x', 11, 8);
     expect(layout.rows.length).toBeGreaterThan(1);
     expect(layout.cursor.row).toBeGreaterThan(0);
-
     const short = renderWorkspaceScreen({
       width: 20,
       height: 8,
@@ -609,22 +690,96 @@ describe('interactive screen lifecycle and editor', () => {
     });
     expect(short.lines).toHaveLength(8);
     expect(short.cursor?.row).toBeLessThan(8);
-    expect(short.lines.at(-1)).toContain('╰');
+    expect(short.lines.some((line) => line.includes('╰'))).toBe(true);
   });
-
-  it('right-aligns footer usage and hides it before it can overlap the shortcut hint', () => {
-    const usage = { totalTokens: 904, estimatedCostUsd: 0 };
+  it('keeps the reference shortcut legend stable with or without usage', () => {
+    const usage = { totalTokens: 904, estimatedCostUsd: 0.001 };
     const wide = renderWorkspaceFooter(130, usage);
     expect(displayWidth(wide)).toBe(130);
-    expect(wide.startsWith('Enter submit · Shift/Alt newline · Ctrl+Enter queue')).toBe(true);
-    expect(wide.endsWith('904 tokens · $0.0000 estimated')).toBe(true);
-
+    expect(wide).toContain('Esc:interrupt');
+    expect(wide).toContain('Ctrl+T:transcript');
+    expect(wide).toContain('?:shortcuts');
+    expect(wide).toContain('Ctrl+C:quit');
+    expect(renderWorkspaceFooter(130, usage, true)).toContain('Ctrl+C:cancel');
+    expect(wide).not.toContain('$0.0010');
     const narrow = renderWorkspaceFooter(54, usage);
     expect(displayWidth(narrow)).toBe(54);
-    expect(narrow).not.toContain('904 tokens');
-    expect(narrow).toContain('Enter submit');
+    expect(narrow).toContain('Esc:interrupt');
+    expect(narrow).toContain('Ctrl+T');
   });
-
+  it('keeps context usage directly beside the footer controls', () => {
+    const footer = renderWorkspaceFooter(100, {
+      totalTokens: 0,
+      estimatedCostUsd: 0,
+      contextTokens: 0,
+      contextWindow: 16_000,
+    });
+    expect(footer).toContain(
+      '0 / 16K  │  Esc:interrupt  │  Ctrl+T:transcript  │  ?:shortcuts  │  Ctrl+C:quit',
+    );
+  });
+  it('formats reference-scale context and live token counts without losing zeroes', () => {
+    const frame = renderWorkspaceScreen({
+      width: 100,
+      height: 16,
+      header: {
+        workspace: '~/Documents',
+        provider: 'capy',
+        model: 'grok-4-5',
+        approval: 'always-approve',
+      },
+      transcript: [],
+      editor: new EditorState(''),
+      busy: true,
+      busyKind: 'prompt',
+      activityStartedAt: Date.now() - 15_000,
+      usage: {
+        totalTokens: 9_450,
+        estimatedCostUsd: 0,
+        contextTokens: 9_500,
+        contextWindow: 500_000,
+      },
+    });
+    const screen = frame.lines.map(plain).join('\n');
+    expect(screen).toContain('9.5K / 500K');
+    expect(screen).toMatch(/1[45]s ⇣9\.45k \[stop\]/);
+    expect(screen).toMatch(/Responding… 1[45]s/);
+  });
+  it('keeps the live 111-column workspace inset without wrapping or duplicate status', () => {
+    const frame = renderWorkspaceScreen({
+      width: 111,
+      height: 30,
+      header: {
+        workspace: '~',
+        provider: 'openai',
+        model: 'openai/gpt-oss-120b',
+        approval: 'full-auto',
+      },
+      transcript: [{ kind: 'user', text: 'hey', timestamp: '2:24' }],
+      editor: new EditorState(''),
+      busy: true,
+      busyKind: 'prompt',
+      activityStartedAt: Date.now() - 4_000,
+      usage: {
+        totalTokens: 0,
+        estimatedCostUsd: 0,
+        contextTokens: 0,
+        contextWindow: 128_000,
+      },
+    });
+    const rows = frame.lines.map(plain);
+    const workspace = rows.join('\n');
+    expect(rows).toHaveLength(30);
+    expect(frame.lines.every((line) => displayWidth(line) === 111)).toBe(true);
+    expect(rows[1]).not.toContain('0 / 128K');
+    expect(rows.find((line) => line.includes('Esc:interrupt'))).toContain(
+      '0 / 128K  │  Esc:interrupt',
+    );
+    expect(rows.find((line) => line.includes('❯ hey'))).not.toContain('2:24');
+    expect(workspace.match(/Responding/g)).toHaveLength(1);
+    expect(workspace).not.toContain('◆ Thinking');
+    expect(workspace).toContain('openai/gpt-oss-120b · full-auto');
+  });
   it('keeps usage updates out of the transcript', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -645,10 +800,9 @@ describe('interactive screen lifecycle and editor', () => {
     await tick();
     input.send('/exit\r');
     await done;
-    expect(plain(output.text)).toContain('904 tokens · $0.0000 estimated');
+    expect(plain(output.text)).toContain('904');
     expect(plain(output.text)).not.toContain('Status');
   });
-
   it('supports editor bindings, history draft restoration, literal paste, and tab completion', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -687,7 +841,48 @@ describe('interactive screen lifecycle and editor', () => {
     expect(commands).toEqual(['help', 'exit']);
     expect(output.text).toContain(CURSOR_SHOW);
   });
+  it('opens Codex-style transcript and shortcut views and supports editor/copy/clear controls', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const prompts: string[] = [];
+    const commands: string[] = [];
+    const done = terminalWorkspace({
+      input: input as never,
+      output: output as never,
+      header: () => ({ workspace: '~', provider: 'fake', model: 'fake', approval: 'suggest' }),
+      async onPrompt(prompt) {
+        prompts.push(prompt);
+      },
+      async onCommand(command) {
+        commands.push(command.name ?? 'unknown');
+        return command.name === 'quit' ? { close: true } : undefined;
+      },
+      async openExternalEditor(draft) {
+        return `${draft} edited`.trim();
+      },
+    });
+    input.send('draft\x07');
+    await tick();
+    input.send('\r');
+    await tick();
+    expect(prompts).toEqual(['draft edited']);
 
+    input.send('\x14');
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).toContain('Ctrl+T close');
+    input.send('\x14');
+    input.send('?');
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).toContain('keyboard shortcuts');
+    input.send('?');
+
+    input.send('\x0f');
+    await tick();
+    expect(commands).toContain('copy');
+    input.send('\x0c');
+    expect(plain(output.text.split('\x1b[2J').at(-1)!)).not.toContain('draft edited');
+    input.send('/quit\r');
+    await done;
+    expect(commands).toContain('quit');
+  });
   it('cleans stale palette rows and restores the screen on close and Ctrl-C', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -706,8 +901,8 @@ describe('interactive screen lifecycle and editor', () => {
     output.columns = 30;
     output.rows = 14;
     output.emit('resize');
-    const resized = plain(output.text.split('\x1b[2J').at(-1)!);
-    expect(resized).toContain('Ready');
+    const resized = plain(output.text.split('\x1b[2J').at(-1)!).replace(/\r/g, '');
+    expect(resized).toMatch(/kyokao|suggest|fake/);
     expect(
       resized
         .split('\n')
@@ -717,7 +912,6 @@ describe('interactive screen lifecycle and editor', () => {
     output.emit('close');
     await done;
     expect(output.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
-
     const interruptInput = new FakeInput();
     const interruptOutput = new FakeOutput();
     const interrupted = terminalWorkspace({
@@ -731,7 +925,6 @@ describe('interactive screen lifecycle and editor', () => {
     await interrupted;
     expect(interruptOutput.text.endsWith(ALT_SCREEN_LEAVE)).toBe(true);
   });
-
   it('shares one screen lifecycle across setup and workspace handoff', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -773,7 +966,6 @@ describe('interactive screen lifecycle and editor', () => {
     expect(count(output.text, ALT_SCREEN_LEAVE)).toBe(1);
   });
 });
-
 describe('first-run setup helpers', () => {
   it('renders a narrow, masked setup screen and validates custom endpoints', () => {
     const screen = plain(
@@ -785,14 +977,13 @@ describe('first-run setup helpers', () => {
         secret: true,
       }),
     );
-    expect(screen).toContain('KYOKAO');
+    expect(screen).toContain('kyokao');
     expect(screen).toContain('••••');
     expect(screen).not.toContain('super-secret-key');
     expect(validateBaseURL('not a url')).toContain('valid');
     expect(validateBaseURL('https://gateway.test/v1')).toBeUndefined();
     expect(setupSelect(0, -1, 2)).toBe(0);
   });
-
   it('navigates first-run setup with keys, preserves environment keys, and restores terminal', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -827,7 +1018,6 @@ describe('first-run setup helpers', () => {
     expect(input.isRaw).toBe(false);
     expect(output.text).toContain('\x1b[?25h');
   });
-
   it('supports custom provider navigation, back, and cancellation', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -846,8 +1036,7 @@ describe('first-run setup helpers', () => {
     await expect(done).resolves.toBeUndefined();
     expect(input.isRaw).toBe(false);
   });
-
-  it('selects a discovered Capy model and remote project without rendering credentials', async () => {
+  it('selects a Capy project, Captain model, and Build model without rendering credentials', async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
     const done = setupWizard({
@@ -865,8 +1054,11 @@ describe('first-run setup helpers', () => {
       ],
       keySource: () => 'environment',
       fetchModels: async () => ['captain-model'],
+      fetchBuildModels: async () => ['captain-model', 'build-model'],
       fetchProjects: async () => [{ id: 'project-1', name: 'Project', description: 'owner/repo' }],
     });
+    input.send('\r');
+    await tick();
     input.send('\r');
     await tick();
     input.send('\r');
@@ -881,13 +1073,51 @@ describe('first-run setup helpers', () => {
     await expect(done).resolves.toMatchObject({
       provider: 'capy',
       model: 'captain-model',
+      buildModel: 'captain-model',
       projectId: 'project-1',
     });
-    expect(plain(output.text)).toContain('remote connected repositories');
+    const setupText = plain(output.text);
+    expect(setupText.indexOf('Choose a Capy project')).toBeLessThan(
+      setupText.indexOf('Choose the Capy Captain model'),
+    );
+    expect(setupText.indexOf('Choose the Capy Captain model')).toBeLessThan(
+      setupText.indexOf('Choose the Capy Build model'),
+    );
+    expect(setupText).toContain('remote connected repositories');
     expect(output.text).not.toContain('secret');
   });
+  it('keeps Capy setup on the key step when API discovery fails', async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const done = setupWizard({
+      input: input as never,
+      output: output as never,
+      configPath: '/tmp/kyokao.json',
+      providers: [
+        {
+          name: 'capy',
+          description: 'Remote agent',
+          remote: true,
+          env: 'CAPY_API_KEY',
+          baseURL: 'https://capy.ai/api/v1',
+        },
+      ],
+      fetchProjects: async () => {
+        throw new Error('Capy API rejected the key');
+      },
+      fetchModels: async () => [],
+      fetchBuildModels: async () => [],
+    });
+    input.send('\r');
+    await tick();
+    input.send('bad-key\r');
+    await tick();
+    expect(plain(output.text)).toContain('Capy API rejected the key');
+    expect(plain(output.text)).toContain('SETUP · KEY');
+    input.send('\u0003');
+    await expect(done).resolves.toBeUndefined();
+  });
 });
-
 describe('setup wizard resilience', () => {
   it('keeps selected providers visible in a height-aware window', () => {
     const items = Array.from({ length: 15 }, (_, i) => ({

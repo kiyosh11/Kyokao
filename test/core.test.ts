@@ -10,6 +10,7 @@ import {
   mergeProviderSetup,
   readConfig,
   redact,
+  saveGlobalConfigPatch,
   saveProviderSelection,
 } from '@kyokao/config';
 import {
@@ -57,6 +58,28 @@ it('replaces existing session files repeatedly without leaving temporary files',
   expect((await store.loadSession(session.id)).task).toBe('save 9');
   expect(await readdir(join(dir, '.kyokao', 'sessions'))).toEqual([`${session.id}.json`]);
 });
+
+it('archives, restores, and forks sessions without mixing archived history into resume results', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'kyokao-session-lifecycle-'));
+  const store = new LocalStore(join(dir, '.kyokao'));
+  const session = await store.create('original');
+  session.messages.push({ role: 'user', content: 'keep this context' });
+  await store.saveSession(session);
+
+  await store.archiveSession(session.id);
+  expect(await store.listSessions()).toEqual([]);
+  expect((await store.listArchivedSessions()).map((item) => item.id)).toEqual([session.id]);
+
+  await store.restoreSession(session.id);
+  const fork = await store.forkSession(session.id);
+  expect(fork.id).not.toBe(session.id);
+  expect(fork.task).toBe('original (fork)');
+  expect(fork.messages).toEqual(session.messages);
+  expect(store.sessionPath(fork.id)).toContain(`${fork.id}.json`);
+  expect((await store.listSessions()).map((item) => item.id)).toEqual(
+    expect.arrayContaining([session.id, fork.id]),
+  );
+});
 describe('configuration', () => {
   it('uses profile before environment and redacts nested secrets', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
@@ -72,11 +95,23 @@ describe('configuration', () => {
     expect(config.model).toBe('environment');
     expect(config.maxIterations).toBe(3);
     expect(redact({ nested: { apiKey: 'x' } })).toEqual({ nested: { apiKey: '***REDACTED***' } });
+    expect(redact({ env: { AUTHORIZATION: 'Bearer x', SESSION_COOKIE: 'secret' } })).toEqual({
+      env: {
+        AUTHORIZATION: '***REDACTED***',
+        SESSION_COOKIE: '***REDACTED***',
+      },
+    });
+    expect(
+      redact({ baseURL: 'https://user:pass@provider.test/v1?api_token=secret#fragment' }),
+    ).toEqual({
+      baseURL: 'https://REDACTED:REDACTED@provider.test/v1?REDACTED',
+    });
   });
   it('accepts MCP, plugin, and context settings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const globalPath = join(dir, 'config.json');
     await writeFile(
-      join(dir, '.kyokao.json'),
+      globalPath,
       JSON.stringify({
         contextWindow: 4000,
         compressionThreshold: 0.7,
@@ -90,7 +125,7 @@ describe('configuration', () => {
         mcp: { demo: { command: 'demo-server', args: ['--stdio'] } },
       }),
     );
-    const config = await loadConfig({ cwd: dir });
+    const config = await loadConfig({ cwd: dir, globalPath, env: {} });
     expect(config.contextWindow).toBe(4000);
     expect(config.mcp.demo.command).toBe('demo-server');
     expect(config.plugins).toEqual(['./plugin.mjs']);
@@ -100,8 +135,9 @@ describe('configuration', () => {
   });
   it('requires and resolves a Capy project binding separately from OpenAI settings', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-capy-config-'));
+    const globalPath = join(dir, 'config.json');
     await writeFile(
-      join(dir, '.kyokao.json'),
+      globalPath,
       JSON.stringify({
         provider: 'capy',
         model: 'captain-model',
@@ -110,15 +146,45 @@ describe('configuration', () => {
     );
     const config = await loadConfig({
       cwd: dir,
+      globalPath,
       env: { ...process.env, CAPY_API_KEY: 'capy-token' },
     });
     expect(config.providers.capy?.projectId).toBe('project-1');
     const invalid = await mkdtemp(join(tmpdir(), 'kyokao-capy-invalid-'));
-    await writeFile(
-      join(invalid, '.kyokao.json'),
-      JSON.stringify({ provider: 'capy', model: 'captain-model' }),
+    const invalidPath = join(invalid, 'config.json');
+    await writeFile(invalidPath, JSON.stringify({ provider: 'capy', model: 'captain-model' }));
+    await expect(loadConfig({ cwd: invalid, globalPath: invalidPath, env: {} })).rejects.toThrow(
+      'projectId',
     );
-    await expect(loadConfig({ cwd: invalid })).rejects.toThrow('projectId');
+  });
+  it('accepts the Capy execution defaults supported by the API', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-capy-defaults-'));
+    const globalPath = join(dir, 'config.json');
+    await writeFile(
+      globalPath,
+      JSON.stringify({
+        provider: 'capy',
+        model: 'captain-model',
+        providers: {
+          capy: {
+            projectId: 'project-1',
+            speed: 'fast',
+            buildModel: 'build-model',
+            buildSpeed: 'standard',
+            tags: ['urgent', 'cli'],
+            repos: [{ repoFullName: 'openai/example', branch: 'main' }],
+          },
+        },
+      }),
+    );
+    const config = await loadConfig({ globalPath, env: {} });
+    expect(config.providers.capy).toMatchObject({
+      speed: 'fast',
+      buildModel: 'build-model',
+      buildSpeed: 'standard',
+      tags: ['urgent', 'cli'],
+      repos: [{ repoFullName: 'openai/example', branch: 'main' }],
+    });
   });
 });
 describe('sandbox and tools', () => {
@@ -153,6 +219,38 @@ describe('sandbox and tools', () => {
       (await tools.execute('http_get', { url: 'https://not-example.test' })).content,
     ).toContain('not allowed');
   });
+  it('rejects no-op patches, out-of-workspace git modes, and redirect allowlist escapes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    await writeFile(join(dir, 'sample.txt'), 'original');
+    const redirectServer = createServer((_request, response) => {
+      response.writeHead(302, { location: 'http://localhost:9/private' });
+      response.end();
+    });
+    servers.push(redirectServer);
+    await new Promise<void>((done) => redirectServer.listen(0, '127.0.0.1', done));
+    const address = redirectServer.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const tools = new CoreTools(new WorkspaceSandbox(dir), 'full-auto', undefined, {
+      maxShellTimeoutMs: 1000,
+      maxOutputChars: 100,
+      maxFileBytes: 1000,
+      allowedHosts: ['127.0.0.1'],
+    });
+
+    const missingPatch = await tools.execute('apply_patch', {
+      path: 'sample.txt',
+      search: 'missing',
+      replace: 'changed',
+    });
+    expect(missingPatch).toMatchObject({ isError: true });
+    expect(await readFile(join(dir, 'sample.txt'), 'utf8')).toBe('original');
+    expect(
+      await tools.execute('git', { args: ['diff', '--no-index', 'sample.txt', '../secret'] }),
+    ).toMatchObject({ isError: true });
+    expect(
+      await tools.execute('http_get', { url: `http://127.0.0.1:${port}/redirect` }),
+    ).toMatchObject({ isError: true, content: expect.stringContaining('localhost') });
+  });
   it.skipIf(process.platform === 'win32')('canonicalizes a symlinked workspace root', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
     const workspace = join(dir, 'workspace');
@@ -167,6 +265,34 @@ describe('sandbox and tools', () => {
   });
 });
 describe('OpenAI SDK streaming transcript', () => {
+  it('keeps SDK reasoning deltas streaming separately from answer text', async () => {
+    const url = await fakeServer(
+      () =>
+        event({
+          choices: [{ delta: { reasoning_content: 'Thinking now.' }, finish_reason: null }],
+        }) +
+        event({
+          choices: [{ delta: { content: 'Answer now.' }, finish_reason: null }],
+        }) +
+        event({ choices: [{ delta: {}, finish_reason: 'stop' }] }) +
+        'data: [DONE]\n\n',
+    );
+    const events: string[] = [];
+    const response = await new OpenAICompatibleProvider({ baseURL: url, model: 'fake' }).chat(
+      [{ role: 'user', content: 'go' }],
+      [],
+      {
+        onReasoning: (delta) => events.push(`reasoning:${delta}`),
+        onText: (delta) => events.push(`text:${delta}`),
+      },
+    );
+    expect(events).toEqual(['reasoning:Thinking now.', 'text:Answer now.']);
+    expect(response.message).toMatchObject({
+      reasoning_content: 'Thinking now.',
+      content: 'Answer now.',
+    });
+  });
+
   it('streams, reconstructs tool calls, persists wire-valid history, and resumes once', async () => {
     const requests: any[] = [];
     const url = await fakeServer((body, call) => {
@@ -257,9 +383,11 @@ describe('OpenAI SDK streaming transcript', () => {
       toOpenAIMessage({
         role: 'assistant',
         content: null,
+        reasoning_content: 'checked the inputs',
         tool_calls: [{ id: 'x', name: 'f', arguments: '{}' }],
       }),
     ).toMatchObject({
+      reasoning_content: 'checked the inputs',
       tool_calls: [{ type: 'function', function: { name: 'f', arguments: '{}' } }],
     }));
 });
@@ -479,6 +607,25 @@ describe('platform extensions', () => {
     );
     expect((await tools.execute('demo_echo', { ok: true })).content).toContain('"ok":true');
   });
+  it('closes loaded plugins when a later plugin fails validation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-plugin-cleanup-'));
+    const marker = join(dir, 'closed.txt').replaceAll('\\', '\\\\');
+    await writeFile(
+      join(dir, 'good.mjs'),
+      `import { writeFile } from 'node:fs/promises';
+       export default {
+         name: 'good',
+         tools: [],
+         async execute() { return { content: 'ok' }; },
+         async close() { await writeFile('${marker}', 'closed'); }
+       };`,
+    );
+    await writeFile(join(dir, 'bad.mjs'), 'export default { name: "bad", tools: [] };');
+    await expect(loadPlugins(['./good.mjs', './bad.mjs'], dir)).rejects.toThrow(
+      'Invalid Kyokao plugin',
+    );
+    expect(await readFile(join(dir, 'closed.txt'), 'utf8')).toBe('closed');
+  });
   it('ships a model catalog with tool capability metadata', () => {
     expect(modelCatalog.find((model) => model.id === 'gpt-4o-mini')).toMatchObject({
       supportsTools: true,
@@ -486,8 +633,10 @@ describe('platform extensions', () => {
     });
   });
   it('validates live model availability before a request', async () => {
+    let modelRequests = 0;
     const server = createServer((request, response) => {
       if (request.url === '/v1/models') {
+        modelRequests += 1;
         response.setHeader('content-type', 'application/json');
         response.end(JSON.stringify({ data: [{ id: 'available' }] }));
       } else response.end(JSON.stringify({ choices: [] }));
@@ -498,9 +647,12 @@ describe('platform extensions', () => {
     const baseURL = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/v1`;
     const provider = new OpenAICompatibleProvider({ baseURL, model: 'available' });
     await expect(provider.validateModel()).resolves.toMatchObject({ id: 'available' });
+    await expect(provider.models()).resolves.toEqual(['available']);
+    expect(modelRequests).toBe(1);
     await expect(
       new OpenAICompatibleProvider({ baseURL, model: 'missing' }).validateModel(),
     ).rejects.toThrow('not available');
+    expect(modelRequests).toBe(2);
   });
   it('discovers and executes MCP stdio tools', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
@@ -541,13 +693,15 @@ describe('platform extensions', () => {
   });
   it('loads repository instruction files in deterministic order', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-'));
+    const home = await mkdtemp(join(tmpdir(), 'kyokao-home-'));
     await writeFile(join(dir, 'SOUL.md'), 'Be precise.');
     await writeFile(join(dir, 'CLAUDE.md'), 'Run tests.');
-    await mkdir(join(dir, '.kyokao'));
-    await writeFile(join(dir, '.kyokao', 'instructions.md'), 'Prefer small patches.');
-    const instructions = await loadInstructionFiles(dir);
+    await writeFile(join(dir, 'AGENTS.md'), 'Run tests.');
+    await writeFile(join(home, 'instructions.md'), 'Prefer small patches.');
+    const instructions = await loadInstructionFiles(dir, home);
     expect(instructions.indexOf('SOUL.md')).toBeLessThan(instructions.indexOf('CLAUDE.md'));
     expect(instructions).toContain('Prefer small patches.');
+    expect(instructions.match(/Run tests\./g)).toHaveLength(1);
   });
   it('falls back to the next model when a provider rejects the primary', async () => {
     const bodies: any[] = [];
@@ -576,6 +730,42 @@ describe('platform extensions', () => {
 });
 
 describe('setup config persistence', () => {
+  it('merges nested TUI configuration patches without losing unrelated settings', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kyokao-config-patch-'));
+    const path = join(dir, 'config.json');
+    await atomicWrite(path, {
+      plugins: ['keep.mjs'],
+      limits: { maxToolCalls: 4 },
+      subagents: { enabled: false },
+      tui: { showThinking: true },
+      providers: { openai: { apiKey: 'keep-secret', baseURL: 'https://provider.test/v1' } },
+    });
+    await saveGlobalConfigPatch(
+      {
+        model: 'new-model',
+        providers: { openai: { model: 'new-model' } },
+        limits: { maxOutputChars: 9000 },
+        subagents: { enabled: true },
+        tui: { showThinking: false },
+      },
+      path,
+    );
+    expect(await readConfig(path)).toMatchObject({
+      model: 'new-model',
+      plugins: ['keep.mjs'],
+      providers: {
+        openai: {
+          apiKey: 'keep-secret',
+          baseURL: 'https://provider.test/v1',
+          model: 'new-model',
+        },
+      },
+      limits: { maxToolCalls: 4, maxOutputChars: 9000 },
+      subagents: { enabled: true },
+      tui: { showThinking: false },
+    });
+  });
+
   it('atomically keeps unrelated global settings while changing provider inputs', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kyokao-config-'));
     const path = join(dir, 'config.json');
@@ -621,7 +811,11 @@ describe('setup config persistence', () => {
       provider: 'custom',
       model: 'provider-model',
       providers: {
-        custom: { baseURL: 'https://provider.test/v1', apiKey: 'new-token' },
+        custom: {
+          baseURL: 'https://provider.test/v1',
+          apiKey: 'new-token',
+          model: 'provider-model',
+        },
         retained: { baseURL: 'http://localhost:1234/v1' },
       },
     });
@@ -646,6 +840,33 @@ it('merges setup persistence without losing unrelated config or blanking saved c
   expect(merged.aliases).toEqual(saved.aliases);
   expect(merged.providers?.openai?.apiKey).toBe('saved');
   expect(merged.providers?.openai?.baseURL).toBeUndefined();
+});
+
+it('persists both Capy agent models selected by setup', () => {
+  const merged = mergeProviderSetup(
+    { providers: { capy: { apiKey: 'saved-key' } } },
+    {
+      provider: 'capy',
+      model: 'captain-model',
+      buildModel: 'build-model',
+      projectId: 'project-1',
+      approval: 'suggest',
+      baseURL: 'https://capy.ai/api/v1',
+      presetBaseURL: 'https://capy.ai/api/v1',
+    },
+  );
+  expect(merged).toMatchObject({
+    provider: 'capy',
+    model: 'captain-model',
+    providers: {
+      capy: {
+        apiKey: 'saved-key',
+        projectId: 'project-1',
+        model: 'captain-model',
+        buildModel: 'build-model',
+      },
+    },
+  });
 });
 
 describe('provider setup credentials and cancellation', () => {

@@ -1,8 +1,10 @@
 import {
+  backgroundEscape,
   codeThemes,
   detectColorLevel,
   isCodeThemeName,
   isTuiThemeName,
+  paintBackground,
   paintToken,
   tuiThemes,
   type CodeThemeName,
@@ -67,6 +69,20 @@ export class ThemeContext {
 
   paint(token: ColorToken, value: string): string {
     return paintToken(value, token, this.colorLevel);
+  }
+
+  background(value: string): string {
+    const token =
+      this.tuiTheme.background ??
+      tuiThemes[this.tuiTheme.dark ? 'kyokao-dark' : 'kyokao-light'].background;
+    return token ? paintBackground(value, token, this.colorLevel) : value;
+  }
+
+  backgroundEscape(): string {
+    const token =
+      this.tuiTheme.background ??
+      tuiThemes[this.tuiTheme.dark ? 'kyokao-dark' : 'kyokao-light'].background;
+    return token ? backgroundEscape(token, this.colorLevel) : '';
   }
 
   tui(token: Exclude<keyof typeof this.tuiTheme, 'name' | 'dark' | 'background'>, value: string) {

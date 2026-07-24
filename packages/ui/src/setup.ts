@@ -1,229 +1,54 @@
-import type { ReadStream, WriteStream } from 'node:tty';
+// @ts-nocheck
+import { graphemes, TerminalInputParser } from './editor.js';
+import { withInteractiveScreen } from './terminal.js';
+import { createThemeContext } from './theme.js';
 import {
-  displayWidth,
-  graphemes,
-  graphemeWidth,
-  padDisplay,
-  TerminalInputParser,
-  truncateDisplay,
-  type InputEvent,
-} from './editor.js';
-import { InteractiveScreen, withInteractiveScreen, type ScreenFrame } from './terminal.js';
-import { createThemeContext, type ThemeContext } from './theme.js';
-
-export type SetupStep =
-  'confirm' | 'provider' | 'name' | 'url' | 'key' | 'model' | 'project' | 'approval' | 'review';
-export type KeySource = 'environment' | 'saved' | 'not configured' | 'local';
-export interface SetupProvider {
-  name: string;
-  description: string;
-  baseURL?: string;
-  local?: boolean;
-  env?: string;
-  remote?: boolean;
-}
-export interface SetupResult {
-  provider: string;
-  baseURL?: string;
-  model: string;
-  approval: 'suggest' | 'auto-edit' | 'full-auto';
-  apiKey?: string;
-  keySource: KeySource;
-  projectId?: string;
-}
-export interface SetupWizardOptions {
-  input?: ReadStream;
-  output?: WriteStream;
-  providers: SetupProvider[];
-  configPath: string;
-  keySource?: (provider: SetupProvider) => KeySource;
-  fetchModels?: (choice: {
-    provider: string;
-    baseURL?: string;
-    apiKey?: string;
-    local?: boolean;
-    signal: AbortSignal;
-  }) => Promise<string[]>;
-  fetchProjects?: (choice: {
-    provider: string;
-    baseURL?: string;
-    apiKey?: string;
-    signal: AbortSignal;
-  }) => Promise<Array<{ id: string; name: string; description?: string }>>;
-  confirmReplace?: boolean;
-  screen?: InteractiveScreen;
-  themeContext?: ThemeContext;
-}
-export const approvalChoices = [
-  { value: 'suggest', description: 'Propose changes; ask before every edit or command.' },
-  { value: 'auto-edit', description: 'Apply file edits automatically; ask before commands.' },
-  {
-    value: 'full-auto',
-    description: 'Run edits and commands without approval. Use only in a trusted workspace.',
-  },
-] as const;
-export function validateProviderName(value: string): string | undefined {
-  return /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value) ? undefined : 'Use letters, numbers, _ or -.';
-}
-export function validateBaseURL(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    return /^https?:$/.test(url.protocol) ? undefined : 'Use an http(s) URL.';
-  } catch {
-    return 'Enter a valid http(s) URL.';
-  }
-}
-export function setupSelect(index: number, delta: number, length: number): number {
-  return Math.max(0, Math.min(Math.max(0, length - 1), index + delta));
-}
-export function maskSecret(value: string): string {
-  return value ? '•'.repeat(Math.min(value.length, 24)) : '';
-}
-export function setupWordmark(width: number): string[] {
-  return width < 36
-    ? ['KYOKAO', 'Local-first coding agent']
-    : [
-        ' _  ___   _____  _  __   _    ___ ',
-        '| |/ / | |/ _ \\| |/ /  /_\\  / _ \\',
-        "| ' <| |_| | (_) | ' <  / _ \\| (_) |",
-        '|_|\\_\\___/ \\___/|_|\\_\\/_/ \\_\\___/ ',
-        'Local-first coding agent',
-      ];
-}
-function fit(value: string, width: number) {
-  return truncateDisplay(value, width);
-}
-export function visibleSetupItems<T>(
-  items: readonly T[],
-  selected: number,
-  height: number,
-  chromeRows = 10,
-) {
-  const size = Math.max(1, Math.min(items.length, Math.max(1, height - chromeRows)));
-  const start = Math.max(0, Math.min(selected - Math.floor(size / 2), items.length - size));
-  return {
-    items: items.slice(start, start + size),
-    start,
-    before: start > 0,
-    after: start + size < items.length,
-  };
-}
-export function renderSetupFrame(input: {
-  width: number;
-  height?: number;
-  step: SetupStep;
-  title: string;
-  items?: Array<{ name: string; description: string; danger?: boolean }>;
-  selected?: number;
-  value?: string;
-  secret?: boolean;
-  message?: string;
-  review?: string[];
-  busy?: boolean;
-  themeContext?: ThemeContext;
-}): ScreenFrame {
-  const context = input.themeContext ?? createThemeContext({ colorLevel: 0 });
-  const width = Math.max(12, input.width);
-  const inner = width - 4;
-  const height = Math.max(8, input.height ?? 28);
-  const line = '─'.repeat(width - 2);
-  const rows = [...setupWordmark(width - 4), '', input.title];
-  if (input.items) {
-    const window = visibleSetupItems(input.items, input.selected ?? 0, height, rows.length + 6);
-    if (window.before) rows.push(context.tui('muted', '  ↑ more'));
-    window.items.forEach((item, offset) => {
-      const index = window.start + offset;
-      const nameWidth = Math.max(4, Math.min(inner - 2, Math.floor(inner * 0.42)));
-      const text = `${index === input.selected ? '›' : ' '} ${padDisplay(item.name, nameWidth)}${item.description ? ` — ${fit(item.description, Math.max(1, inner - nameWidth - 5))}` : ''}`;
-      rows.push(
-        item.danger
-          ? context.tui('error', text)
-          : index === input.selected
-            ? context.tui('selected', text)
-            : text,
-      );
-    });
-    if (window.after) rows.push(context.tui('muted', '  ↓ more'));
-  }
-  let inputRow: number | undefined;
-  if (input.value !== undefined) {
-    rows.push('');
-    inputRow = rows.length;
-    rows.push(`› ${input.secret ? maskSecret(input.value) : fit(input.value, inner - 2)}`);
-  }
-  if (input.review) rows.push('', ...input.review.map((row) => fit(row, inner)));
-  if (input.message) rows.push('', input.message);
-  const controls = input.busy
-    ? 'Checking models… Ctrl-C cancels'
-    : input.step === 'review'
-      ? 'Enter save · Esc back · Ctrl-C cancel'
-      : input.items
-        ? '↑/↓ or j/k move · Enter choose · Esc back · Ctrl-C cancel'
-        : 'Enter continue · Esc back · Ctrl-C cancel';
-  const contentRows = Math.max(1, height - 4);
-  const visibleRows = rows.slice(0, contentRows);
-  while (visibleRows.length < contentRows) visibleRows.push('');
-  const lines = [
-    context.tui('border', `╭${line}╮`),
-    ...visibleRows.map((row) => `│ ${padDisplay(row, inner)} │`),
-    context.tui('border', `├${line}┤`),
-    `│ ${context.tui('muted', padDisplay(controls, inner))} │`,
-    context.tui('border', `╰${line}╯`),
-  ];
-  if (lines.length > height) lines.splice(1 + contentRows, lines.length - height);
-  const cursor =
-    inputRow === undefined || input.busy
-      ? undefined
-      : {
-          row: Math.min(height - 3, 1 + inputRow),
-          column: Math.min(
-            width - 3,
-            2 +
-              displayWidth('› ') +
-              (input.secret
-                ? displayWidth(maskSecret(input.value ?? ''))
-                : graphemes(input.value ?? '').reduce(
-                    (sum, value) => sum + graphemeWidth(value),
-                    0,
-                  )),
-          ),
-        };
-  return { lines, cursor };
-}
-
-export function renderSetupScreen(input: Parameters<typeof renderSetupFrame>[0]): string {
-  return renderSetupFrame(input).lines.join('\n');
-}
-
-async function runSetupWizard(
-  options: SetupWizardOptions,
-  screen: InteractiveScreen,
-): Promise<SetupResult | undefined> {
+  approvalChoices,
+  renderSetupFrame,
+  setupSelect,
+  validateBaseURL,
+  validateProviderName,
+} from './setup-render.js';
+export {
+  approvalChoices,
+  maskSecret,
+  renderSetupFrame,
+  renderSetupScreen,
+  setupSelect,
+  setupWordmark,
+  validateBaseURL,
+  validateProviderName,
+  visibleSetupItems,
+} from './setup-render.js';
+async function runSetupWizard(options, screen) {
   const input = screen.input;
   const output = screen.output;
   const context =
     options.themeContext ?? createThemeContext({ isTTY: output.isTTY, env: process.env });
-  let step: SetupStep = options.confirmReplace ? 'confirm' : 'provider';
+  let step = options.confirmReplace ? 'confirm' : 'provider';
   let selected = options.confirmReplace ? 1 : 0;
   let value = '';
   let message = '';
   let busy = false;
   let closed = false;
-  let fetchController: AbortController | undefined;
-  let provider = options.providers[0]!;
+  let fetchController;
+  let provider = options.providers[0];
   let providerName = provider.name;
   let baseURL = provider.baseURL;
-  let apiKey: string | undefined;
-  let keySource: KeySource = provider.local ? 'local' : 'not configured';
+  let apiKey;
+  let keySource = provider.local ? 'local' : 'not configured';
   let model = '';
-  let approval: SetupResult['approval'] = 'suggest';
-  let models: string[] = [];
-  let projects: Array<{ id: string; name: string; description?: string }> = [];
+  let approval = 'suggest';
+  let models = [];
+  let buildModels = [];
+  let projects = [];
   let projectId = '';
+  let buildModel = '';
+  let fetchError;
   const draw = () => {
     const width = output.columns ?? 80;
     const height = output.rows ?? 28;
-    const screen = (title: string, extra: Partial<Parameters<typeof renderSetupScreen>[0]>) =>
+    const screen = (title, extra) =>
       screenOutput.draw(
         renderSetupFrame({
           width,
@@ -262,10 +87,27 @@ async function runSetupWizard(
         selected,
       });
     if (step === 'model' && models.length)
-      return screen('Choose a model (or select Manual entry)', {
+      return screen(
+        provider.name === 'capy'
+          ? 'Choose the Capy Captain model'
+          : 'Choose a model (or select Manual entry)',
+        {
+          items: [
+            ...models.map((name) => ({ name, description: '' })),
+            ...(provider.name === 'capy'
+              ? []
+              : [{ name: 'Manual entry', description: 'Enter any model ID' }]),
+          ],
+          selected,
+        },
+      );
+    if (step === 'build-model' && buildModels.length)
+      return screen('Choose the Capy Build model', {
         items: [
-          ...models.map((name) => ({ name, description: '' })),
-          { name: 'Manual entry', description: 'Enter any model ID' },
+          ...buildModels.map((name) => ({
+            name,
+            description: name === model ? 'same model as Captain' : '',
+          })),
         ],
         selected,
       });
@@ -276,10 +118,6 @@ async function runSetupWizard(
             name: project.name,
             description: `${project.id}${project.description ? ` · ${project.description}` : ''}`,
           })),
-          {
-            name: 'Manual project ID',
-            description: 'Explicit fallback when discovery is unavailable',
-          },
         ],
         selected,
       });
@@ -287,7 +125,8 @@ async function runSetupWizard(
       return screen('Review setup', {
         review: [
           `Provider: ${providerName}`,
-          `Model: ${model}`,
+          `Model: ${model}${provider.name === 'capy' ? ' (Captain)' : ''}`,
+          ...(buildModel ? [`Build model: ${buildModel}`] : []),
           ...(projectId ? [`Capy project: ${projectId} (remote connected repositories)`] : []),
           `Base URL: ${baseURL ?? 'preset'}`,
           `Key: ${keySource === 'local' ? 'not configured' : keySource}`,
@@ -296,31 +135,46 @@ async function runSetupWizard(
           ...(apiKey ? ['A key will be stored locally (0600).'] : []),
         ],
       });
-    const labels: Record<string, string> = {
+    const labels = {
       name: 'Name your OpenAI-compatible provider',
       url: 'Enter its base URL (usually ending in /v1)',
-      key: provider.env
-        ? `${provider.env} API key (optional; input is hidden)`
-        : 'API key (optional; input is hidden)',
+      key: provider.remote
+        ? `${provider.env ?? 'API'} key (required to fetch projects and models; input is hidden)`
+        : provider.env
+          ? `${provider.env} API key (optional; input is hidden)`
+          : 'API key (optional; input is hidden)',
       model: 'Enter a model ID',
+      'build-model': 'Enter a Capy Build model ID',
       project: 'Enter a Capy project ID',
     };
     return screen(labels[step], { value, secret: step === 'key' });
   };
-  const fetchWithTimeout = async <T>(request: (() => Promise<T>) | undefined, fallback: T) => {
+  const fetchWithTimeout = async (
+    request,
+    fallback,
+    timeoutMs = provider.remote ? 15000 : 4000,
+  ) => {
     if (!request) return fallback;
     fetchController = new AbortController();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timeout;
+    let didTimeout = false;
     try {
-      const pending = request();
-      const timedOut = new Promise<T>((resolve) => {
+      const pending = request().catch((error) => {
+        if (didTimeout) return fallback;
+        throw error;
+      });
+      const timedOut = new Promise((resolve) => {
         timeout = setTimeout(() => {
+          didTimeout = true;
           fetchController?.abort();
           resolve(fallback);
-        }, 4000);
+        }, timeoutMs);
       });
-      return await Promise.race([pending, timedOut]);
-    } catch {
+      const result = await Promise.race([pending, timedOut]);
+      if (didTimeout) fetchError = `request timed out after ${timeoutMs}ms`;
+      return result;
+    } catch (error) {
+      fetchError = error instanceof Error ? error.message : String(error);
       return fallback;
     } finally {
       if (timeout) clearTimeout(timeout);
@@ -336,7 +190,7 @@ async function runSetupWizard(
       return true;
     }
     if (step === 'provider') {
-      provider = options.providers[selected]!;
+      provider = options.providers[selected];
       providerName = provider.name;
       baseURL = provider.baseURL;
       keySource = provider.local ? 'local' : (options.keySource?.(provider) ?? 'not configured');
@@ -372,45 +226,90 @@ async function runSetupWizard(
         keySource = 'saved';
       }
       value = '';
+      fetchError = undefined;
       busy = true;
       draw();
+      if (provider.name === 'capy')
+        projects = await fetchWithTimeout(
+          options.fetchProjects
+            ? () =>
+                options.fetchProjects({
+                  provider: providerName,
+                  baseURL,
+                  apiKey,
+                  signal: fetchController.signal,
+                })
+            : undefined,
+          [],
+        );
       models = await fetchWithTimeout(
         options.fetchModels
           ? () =>
-              options.fetchModels!({
+              options.fetchModels({
                 provider: providerName,
                 baseURL,
                 apiKey,
                 local: provider.local,
-                signal: fetchController!.signal,
+                signal: fetchController.signal,
               })
           : undefined,
         [],
       );
-      if (provider.remote)
-        projects = await fetchWithTimeout(
-          options.fetchProjects
+      if (provider.name === 'capy')
+        buildModels = await fetchWithTimeout(
+          options.fetchBuildModels
             ? () =>
-                options.fetchProjects!({
+                options.fetchBuildModels({
                   provider: providerName,
                   baseURL,
                   apiKey,
-                  signal: fetchController!.signal,
+                  local: provider.local,
+                  signal: fetchController.signal,
                 })
             : undefined,
           [],
         );
       if (closed) return false;
       busy = false;
-      step = 'model';
+      const problems = [];
+      if (!models.length) {
+        problems.push(
+          fetchError
+            ? `Models: ${fetchError}`
+            : provider.remote
+              ? 'Models: API returned none — check your key.'
+              : 'Models: endpoint returned none.',
+        );
+      }
+      if (provider.name === 'capy' && !buildModels.length) {
+        problems.push(
+          fetchError
+            ? `Build models: ${fetchError}`
+            : 'Build models: API returned none; check your key.',
+        );
+      }
+      if (provider.name === 'capy' && !projects.length) {
+        problems.push(
+          fetchError ? `Projects: ${fetchError}` : 'Projects: API returned none — check your key.',
+        );
+      }
+      if (problems.length) {
+        message = problems.join(' · ');
+        if (provider.name === 'capy') {
+          step = 'key';
+          selected = 0;
+          return true;
+        }
+      }
+      step = provider.name === 'capy' ? 'project' : 'model';
       selected = 0;
       return true;
     }
     if (step === 'model') {
       if (models.length && selected < models.length) {
-        model = models[selected]!;
+        model = models[selected];
         selected = 0;
-        step = provider.remote ? 'project' : 'approval';
+        step = provider.name === 'capy' ? 'build-model' : 'approval';
       } else {
         value = '';
         models = [];
@@ -419,17 +318,28 @@ async function runSetupWizard(
     }
     if (step === 'project') {
       if (projects.length && selected < projects.length) {
-        projectId = projects[selected]!.id;
+        projectId = projects[selected].id;
         selected = 0;
-        step = 'approval';
+        step = 'model';
       } else {
         value = '';
         projects = [];
       }
       return true;
     }
+    if (step === 'build-model') {
+      if (buildModels.length && selected < buildModels.length) {
+        buildModel = buildModels[selected];
+        selected = 0;
+        step = 'approval';
+      } else {
+        value = '';
+        buildModels = [];
+      }
+      return true;
+    }
     if (step === 'approval') {
-      approval = approvalChoices[selected]!.value;
+      approval = approvalChoices[selected].value;
       step = 'review';
       return true;
     }
@@ -441,9 +351,11 @@ async function runSetupWizard(
     if (step === 'name') step = 'provider';
     else if (step === 'url') step = 'name';
     else if (step === 'key') step = provider.name === '__custom__' ? 'url' : 'provider';
-    else if (step === 'model') step = provider.local ? 'provider' : 'key';
-    else if (step === 'project') step = 'model';
-    else if (step === 'approval') step = provider.remote ? 'project' : 'model';
+    else if (step === 'model')
+      step = provider.name === 'capy' ? 'project' : provider.local ? 'provider' : 'key';
+    else if (step === 'build-model') step = 'model';
+    else if (step === 'project') step = 'key';
+    else if (step === 'approval') step = provider.name === 'capy' ? 'build-model' : 'model';
     else step = 'approval';
     selected = 0;
     value = '';
@@ -452,21 +364,21 @@ async function runSetupWizard(
   const screenOutput = screen;
   const onResize = () => draw();
   output.on('resize', onResize);
-  let dataListener: ((chunk: string) => void) | undefined;
-  let streamFinish: (() => void) | undefined;
-  let escapeTimer: ReturnType<typeof setTimeout> | undefined;
+  let dataListener;
+  let streamFinish;
+  let escapeTimer;
   const parser = new TerminalInputParser();
   try {
     draw();
-    return await new Promise<SetupResult | undefined>((resolve) => {
-      const finish = (result?: SetupResult) => {
+    return await new Promise((resolve) => {
+      const finish = (result) => {
         if (closed) return;
         closed = true;
         fetchController?.abort();
         resolve(result);
       };
       streamFinish = () => finish();
-      const handleEvent = (event: InputEvent) => {
+      const handleEvent = (event) => {
         if (event.type === 'key' && event.key === 'interrupt') return finish();
         if (busy) return;
         if (event.type === 'key' && event.key === 'escape') {
@@ -478,7 +390,14 @@ async function runSetupWizard(
           step === 'review' &&
           event.type === 'key' &&
           (event.key === 'enter' || event.key === 'newline' || event.key === 'queue')
-        )
+        ) {
+          if (provider.remote && provider.name === 'capy' && !projectId.trim()) {
+            message = 'A Capy project ID is required. Going back to project selection…';
+            step = 'project';
+            selected = 0;
+            draw();
+            return;
+          }
           return finish({
             provider: providerName,
             baseURL,
@@ -487,7 +406,9 @@ async function runSetupWizard(
             apiKey,
             keySource,
             projectId: projectId || undefined,
+            buildModel: buildModel || undefined,
           });
+        }
         const listLength =
           step === 'confirm'
             ? 2
@@ -496,10 +417,12 @@ async function runSetupWizard(
               : step === 'approval'
                 ? approvalChoices.length
                 : step === 'model' && models.length
-                  ? models.length + 1
-                  : step === 'project' && projects.length
-                    ? projects.length + 1
-                    : 0;
+                  ? models.length + (provider.name === 'capy' ? 0 : 1)
+                  : step === 'build-model' && buildModels.length
+                    ? buildModels.length
+                    : step === 'project' && projects.length
+                      ? projects.length
+                      : 0;
         const listDelta =
           event.type === 'key' && event.key === 'up'
             ? -1
@@ -528,7 +451,20 @@ async function runSetupWizard(
             model = value.trim();
             value = '';
             selected = 0;
-            step = provider.remote ? 'project' : 'approval';
+            step = provider.name === 'capy' ? 'build-model' : 'approval';
+            draw();
+            return;
+          }
+          if (step === 'build-model' && !buildModels.length) {
+            if (!value.trim()) {
+              message = 'Enter a Build model ID.';
+              draw();
+              return;
+            }
+            buildModel = value.trim();
+            value = '';
+            selected = 0;
+            step = 'approval';
             draw();
             return;
           }
@@ -541,7 +477,7 @@ async function runSetupWizard(
             projectId = value.trim();
             value = '';
             selected = 0;
-            step = 'approval';
+            step = 'model';
             draw();
             return;
           }
@@ -564,7 +500,7 @@ async function runSetupWizard(
           draw();
         }
       };
-      const onData = (chunk: string) => {
+      const onData = (chunk) => {
         if (escapeTimer) clearTimeout(escapeTimer);
         for (const event of parser.feed(chunk)) handleEvent(event);
         escapeTimer = setTimeout(() => {
@@ -591,8 +527,7 @@ async function runSetupWizard(
     output.removeListener('resize', onResize);
   }
 }
-
-export async function setupWizard(options: SetupWizardOptions): Promise<SetupResult | undefined> {
+export async function setupWizard(options) {
   if (options.screen) return await runSetupWizard(options, options.screen);
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;

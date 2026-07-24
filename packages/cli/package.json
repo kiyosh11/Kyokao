@@ -1,6 +1,6 @@
 {
   "name": "kyokao",
-  "version": "0.5.5",
+  "version": "0.8.0",
   "description": "A safe local and Capy remote coding agent",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
   },
   "dependencies": {},
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && esbuild dist/index.js --bundle --platform=node --format=cjs --outfile=dist/kyokao.cjs && chmod +x dist/kyokao.cjs",
+    "build": "tsc -p tsconfig.build.json && esbuild dist/index.js --bundle --platform=node --format=cjs --outfile=dist/kyokao.cjs && node -e \"require('node:fs').chmodSync('dist/kyokao.cjs', 0o755)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/index.ts",
     "prepack": "node ../../scripts/package-assets.mjs"
